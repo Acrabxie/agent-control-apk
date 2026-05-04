@@ -111,6 +111,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -486,10 +488,12 @@ private fun ChatPanel(
             onOpenAgent = { agent ->
                 store.selectedAgentId = agent.id
                 store.selectedTargetId = agent.id
+                store.ensureConversationFor(agent.id)
                 openConversationId = agent.id
             },
             onOpenTeam = { team ->
                 store.selectedTargetId = team.id
+                store.ensureConversationFor(team.id)
                 team.memberIds.firstOrNull()?.let { memberId ->
                     if (store.agents.any { it.id == memberId }) store.selectedAgentId = memberId
                 }
@@ -501,9 +505,9 @@ private fun ChatPanel(
 
     val activeTargetId = activeAgent?.id ?: activeTeam?.id.orEmpty()
     val conversationMessages = if (activeTeam != null) {
-        messagesForTeamConversation(store, activeTeam.id)
+        store.messagesForActiveConversation(activeTeam.id)
     } else {
-        messagesForConversation(store, activeAgent!!.id)
+        store.messagesForActiveConversation(activeAgent!!.id)
     }
     val awaitingReply = conversationAwaitingReply(conversationMessages, activeTargetId)
 
@@ -516,9 +520,9 @@ private fun ChatPanel(
     fun requestScrollToBottom() {
         scope.launch {
             val latestMessages = if (activeTeam != null) {
-                messagesForTeamConversation(store, activeTeam.id)
+                store.messagesForActiveConversation(activeTeam.id)
             } else {
-                messagesForConversation(store, activeAgent!!.id)
+                store.messagesForActiveConversation(activeAgent!!.id)
             }
             if (latestMessages.isNotEmpty()) {
                 runCatching { messageListState.animateScrollToItem(latestMessages.lastIndex) }
@@ -612,6 +616,10 @@ private fun ChatPanel(
                 team = activeTeam,
                 memberNames = activeTeam.memberIds.mapNotNull { memberId -> store.agents.firstOrNull { it.id == memberId }?.name },
                 onBack = { openConversationId = null },
+                onNewConversation = {
+                    store.startNewConversation(activeTeam.id)
+                    focusManager.clearFocus()
+                },
             )
             TeamSharedProfile(activeTeam)
         } else {
@@ -619,6 +627,10 @@ private fun ChatPanel(
                 agent = activeAgent!!,
                 parentName = activeAgent.parentId?.let { id -> store.agents.firstOrNull { it.id == id }?.name },
                 onBack = { openConversationId = null },
+                onNewConversation = {
+                    store.startNewConversation(activeAgent.id)
+                    focusManager.clearFocus()
+                },
             )
         }
         LazyColumn(
@@ -738,7 +750,7 @@ private fun ConversationList(
             TeamConversationRow(
                 team = team,
                 memberNames = team.memberIds.mapNotNull { memberId -> store.agents.firstOrNull { it.id == memberId }?.name },
-                lastMessage = lastMessageForTeamConversation(store, team.id),
+                lastMessage = store.lastMessageForActiveConversation(team.id),
                 onClick = { onOpenTeam(team) },
             )
         }
@@ -746,7 +758,7 @@ private fun ConversationList(
             ConversationRow(
                 agent = agent,
                 parentName = agent.parentId?.let { id -> store.agents.firstOrNull { it.id == id }?.name },
-                lastMessage = lastMessageForConversation(store, agent.id),
+                lastMessage = store.lastMessageForActiveConversation(agent.id),
                 onClick = { onOpenAgent(agent) },
             )
         }
@@ -875,6 +887,7 @@ private fun ConversationHeader(
     agent: AgentNode,
     parentName: String?,
     onBack: () -> Unit,
+    onNewConversation: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -901,6 +914,12 @@ private fun ConversationHeader(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            IconButton(
+                modifier = Modifier.semantics { contentDescription = "New conversation" },
+                onClick = onNewConversation,
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
+            }
             StatusDot(agent.status)
         }
     }
@@ -911,6 +930,7 @@ private fun TeamConversationHeader(
     team: AgentTeam,
     memberNames: List<String>,
     onBack: () -> Unit,
+    onNewConversation: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -936,6 +956,12 @@ private fun TeamConversationHeader(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            IconButton(
+                modifier = Modifier.semantics { contentDescription = "New conversation" },
+                onClick = onNewConversation,
+            ) {
+                Icon(Icons.Default.Add, contentDescription = null)
             }
             StatusDot(AgentStatus.ONLINE)
         }
@@ -1010,26 +1036,6 @@ private fun TeamAvatar() {
     }
 }
 
-private fun messagesForConversation(store: AgentControlStore, agentId: String): List<ChatMessage> =
-    store.messages.filter { message ->
-        message.authorId == agentId ||
-            message.targetAgentId == agentId
-    }
-
-private fun lastMessageForConversation(store: AgentControlStore, agentId: String): ChatMessage? =
-    store.messages.asReversed().firstOrNull { message ->
-        message.kind != MessageKind.SYSTEM &&
-            (message.authorId == agentId || message.targetAgentId == agentId)
-    }
-
-private fun messagesForTeamConversation(store: AgentControlStore, teamId: String): List<ChatMessage> =
-    store.messages.filter { message -> message.targetAgentId == teamId }
-
-private fun lastMessageForTeamConversation(store: AgentControlStore, teamId: String): ChatMessage? =
-    store.messages.asReversed().firstOrNull { message ->
-        message.kind != MessageKind.SYSTEM && message.targetAgentId == teamId
-    }
-
 private fun conversationAwaitingReply(messages: List<ChatMessage>, targetId: String): Boolean {
     val lastUser = messages.asReversed().firstOrNull { it.kind == MessageKind.USER && it.targetAgentId == targetId }
         ?: return false
@@ -1043,9 +1049,11 @@ private fun conversationAwaitingReply(messages: List<ChatMessage>, targetId: Str
 private fun remoteReplyFor(store: AgentControlStore, message: ChatMessage): ChatMessage? {
     val targetId = message.targetAgentId ?: store.selectedTargetId
     val isTeam = store.teams.any { it.id == targetId }
+    val conversationId = message.conversationId.ifBlank { store.conversationIdFor(targetId) }
     return store.messages.asReversed().firstOrNull { candidate ->
         candidate.kind == MessageKind.AGENT &&
             candidate.createdAt >= message.createdAt &&
+            store.messageBelongsToConversation(candidate, targetId, conversationId) &&
             if (isTeam) {
                 candidate.targetAgentId == targetId
             } else {

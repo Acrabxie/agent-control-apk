@@ -893,13 +893,15 @@ function normalizePersistedMessage(message) {
   if (!message || typeof message !== "object") return null;
   const now = Date.now();
   const text = boundedText(message.text, 12000);
+  const targetAgentId = message.targetAgentId == null ? null : sanitizeText(message.targetAgentId, "", 80) || null;
   return {
     id: sanitizeText(message.id, id(), 80),
     authorId: sanitizeText(message.authorId, "system", 80),
     kind: ["USER", "AGENT", "SYSTEM"].includes(message.kind) ? message.kind : "AGENT",
     text,
     createdAt: finiteTimestamp(message.createdAt, now),
-    targetAgentId: message.targetAgentId == null ? null : sanitizeText(message.targetAgentId, "", 80) || null,
+    targetAgentId,
+    conversationId: sanitizeText(message.conversationId, "", 140),
     attachments: normalizePersistedAttachments(message.attachments),
     toolCalls: normalizePersistedToolCalls(message.toolCalls),
   };
@@ -1017,8 +1019,11 @@ async function snapshot() {
 }
 
 function runtimeContextFor(agent, payload) {
+  const baseContext = {
+    conversationId: sanitizeText(payload?.conversationId, "", 140),
+  };
   const rootAgent = rootAdapterFor(agent);
-  if (rootAgent.id !== "codex") return {};
+  if (rootAgent.id !== "codex") return baseContext;
   if (payload?.runtimeOptions) {
     codexRuntimeSettings = normalizeCodexRuntimeSettings({
       ...codexRuntimeSettings,
@@ -1027,7 +1032,7 @@ function runtimeContextFor(agent, payload) {
     schedulePrivateBridgeStateSave();
   }
   updateCodexContextEstimate();
-  return { runtimeSettings: codexRuntimeSettings };
+  return { ...baseContext, runtimeSettings: codexRuntimeSettings };
 }
 
 function codexRuntimeSnapshot() {
@@ -1081,10 +1086,11 @@ async function routeMessage(payload) {
   const text = String(payload.text || "").trim();
   const targetAgentId = payload.targetAgentId || "codex";
   const clientMessageId = sanitizeText(payload.clientMessageId, "", 80);
+  const conversationId = sanitizeText(payload.conversationId, "", 140);
   const replyId = clientMessageId ? replyIdForClientMessage(clientMessageId) : id();
   const existingReply = clientMessageId ? state.messages.find((message) => message.id === replyId) : null;
   if (existingReply) return existingReply;
-  mergeClientConversationContext(payload.conversationContext, targetAgentId);
+  mergeClientConversationContext(payload.conversationContext, targetAgentId, conversationId);
   const team = findTeam(targetAgentId);
   if (team) return await routeTeamMessage(team, payload);
   const agent = findAgent(targetAgentId) || agentDefinitions[0];
@@ -1098,6 +1104,7 @@ async function routeMessage(payload) {
       text: text || "sent from phone",
       createdAt: Date.now(),
       targetAgentId: agent.id,
+      conversationId,
       attachments: payload.attachments || [],
       toolCalls: [],
     };
@@ -1126,6 +1133,7 @@ async function routeMessage(payload) {
     text: directiveResult.text,
     createdAt: Date.now(),
     targetAgentId: "you",
+    conversationId,
     attachments: [],
     toolCalls: completedToolCallsFor(agent, text, [], response.toolCalls, directiveResult),
   };
@@ -1157,6 +1165,7 @@ function pendingReplyFor(agent, text, replyId = id(), context = {}) {
     text: "Thinking...",
     createdAt: now,
     targetAgentId: "you",
+    conversationId: sanitizeText(context.conversationId, "", 140),
     attachments: [],
     toolCalls: pendingToolCallsFor(agent, text, context, now),
   };
@@ -1578,7 +1587,8 @@ function replaceMessage(message) {
 
 async function routeTeamMessage(team, payload) {
   const text = String(payload.text || "").trim();
-  mergeClientConversationContext(payload.conversationContext, team.id);
+  const conversationId = sanitizeText(payload.conversationId, "", 140);
+  mergeClientConversationContext(payload.conversationContext, team.id, conversationId);
   const userMessage = {
     id: id(),
     authorId: "you",
@@ -1586,6 +1596,7 @@ async function routeTeamMessage(team, payload) {
     text: text || "sent to team",
     createdAt: Date.now(),
     targetAgentId: team.id,
+    conversationId,
     attachments: payload.attachments || [],
     toolCalls: [],
   };
@@ -1604,6 +1615,7 @@ async function routeTeamMessage(team, payload) {
       text: directiveResult.text,
       createdAt: Date.now(),
       targetAgentId: team.id,
+      conversationId,
       attachments: [],
       toolCalls: completedToolCallsFor(
         speaker,
@@ -1625,6 +1637,7 @@ async function routeTeamMessage(team, payload) {
     text: `${team.name} has no available members yet.`,
     createdAt: Date.now(),
     targetAgentId: team.id,
+    conversationId,
     attachments: [],
     toolCalls: [],
   };
@@ -1639,12 +1652,13 @@ async function routeTeamMessage(team, payload) {
   return finalReply;
 }
 
-function mergeClientConversationContext(messages = [], targetId = "") {
+function mergeClientConversationContext(messages = [], targetId = "", conversationId = "") {
   if (!Array.isArray(messages) || !messages.length) return;
   const normalized = messages
     .map(normalizePersistedMessage)
     .filter(Boolean)
-    .filter((message) => messageBelongsToTarget(message, targetId));
+    .filter((message) => messageBelongsToTarget(message, targetId))
+    .filter((message) => !conversationId || messageConversationId(message, targetId) === conversationId);
   if (!normalized.length) return;
   const byId = new Map(state.messages.map((message) => [message.id, message]));
   for (const message of normalized) byId.set(message.id, message);
@@ -1656,6 +1670,14 @@ function mergeClientConversationContext(messages = [], targetId = "") {
 function messageBelongsToTarget(message, targetId) {
   if (!targetId) return true;
   return message.targetAgentId === targetId || message.authorId === targetId;
+}
+
+function messageConversationId(message, targetId = "") {
+  return sanitizeText(message?.conversationId, "", 140) || defaultConversationId(targetId);
+}
+
+function defaultConversationId(targetId = "") {
+  return targetId ? `default:${targetId}` : "";
 }
 
 async function performMessage(session, encryptedBody) {
@@ -2190,11 +2212,16 @@ function recentConversationMessages(context = {}, target = null) {
   const currentMessageId = context.currentMessageId || "";
   const teamId = context.team?.id || "";
   const targetId = target?.id || "";
+  const conversationId = sanitizeText(context.conversationId, "", 140);
   return state.messages
     .filter((message) => {
       if (!message?.text || message.id === currentMessageId) return false;
-      if (teamId) return message.targetAgentId === teamId || message.authorId === teamId;
+      if (teamId) {
+        if (conversationId && messageConversationId(message, teamId) !== conversationId) return false;
+        return message.targetAgentId === teamId || message.authorId === teamId;
+      }
       if (!targetId) return false;
+      if (conversationId && messageConversationId(message, targetId) !== conversationId) return false;
       return message.targetAgentId === targetId || message.authorId === targetId;
     })
     .slice(-MAX_PROMPT_MEMORY_MESSAGES);

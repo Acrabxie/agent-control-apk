@@ -39,6 +39,37 @@ class AgentControlStoreHistoryTest {
         assertThat(payload.conversationContext.map { it.id }).doesNotContain(followUp.id)
     }
 
+    @Test
+    fun newConversationDoesNotSendPreviousThreadAsContext() {
+        val store = AgentControlStore()
+
+        store.selectedTargetId = "codex"
+        store.draftText = "请记住测试词 amber-thread"
+        val firstUserMessage = store.consumeDraft()!!
+        store.addRemoteReply(
+            ChatMessage(
+                id = "codex-reply-amber",
+                authorId = "codex",
+                kind = MessageKind.AGENT,
+                text = "已记住 amber-thread",
+                createdAt = firstUserMessage.createdAt + 1,
+                targetAgentId = "you",
+                conversationId = firstUserMessage.conversationId,
+            )
+        )
+
+        val oldConversationId = firstUserMessage.conversationId
+        val newConversationId = store.startNewConversation("codex")
+        store.draftText = "新对话里上一轮测试词是什么？"
+        val newUserMessage = store.consumeDraft()!!
+        val payload = store.outboundPayload(newUserMessage)
+
+        assertThat(newConversationId).isNotEqualTo(oldConversationId)
+        assertThat(payload.conversationId).isEqualTo(newConversationId)
+        assertThat(payload.conversationContext.map { it.text }).doesNotContain("请记住测试词 amber-thread")
+        assertThat(payload.conversationContext.map { it.text }).doesNotContain("已记住 amber-thread")
+    }
+
     private class FakeConversationPersistence : ConversationPersistence {
         var state: PersistedConversationState? = null
 

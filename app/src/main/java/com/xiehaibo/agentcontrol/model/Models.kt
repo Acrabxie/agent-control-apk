@@ -98,6 +98,7 @@ data class ChatMessage(
     val text: String,
     val createdAt: Long,
     val targetAgentId: String? = null,
+    val conversationId: String = "",
     val attachments: List<FileTransfer> = emptyList(),
     val toolCalls: List<ToolCall> = emptyList(),
 )

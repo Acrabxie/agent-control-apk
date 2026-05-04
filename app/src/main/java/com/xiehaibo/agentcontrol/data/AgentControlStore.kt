@@ -1,6 +1,7 @@
 package com.xiehaibo.agentcontrol.data
 
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -188,6 +189,7 @@ class AgentControlStore(
             ),
         ),
     )
+    val activeConversationIds = mutableStateMapOf<String, String>()
 
     val documents = mutableStateListOf(
         ProjectDocument(
@@ -431,6 +433,35 @@ class AgentControlStore(
         )
     }
 
+    fun conversationIdFor(targetId: String): String =
+        activeConversationIds[targetId] ?: defaultConversationId(targetId)
+
+    fun ensureConversationFor(targetId: String): String {
+        val conversationId = conversationIdFor(targetId)
+        activeConversationIds[targetId] = conversationId
+        persistConversation()
+        return conversationId
+    }
+
+    fun startNewConversation(targetId: String = selectedTargetId): String {
+        val conversationId = "conv:${targetId.take(32)}:${UUID.randomUUID().toString().take(8)}"
+        activeConversationIds[targetId] = conversationId
+        if (selectedTargetId == targetId) {
+            draftText = ""
+            pendingAttachments.clear()
+        }
+        persistConversation()
+        return conversationId
+    }
+
+    fun messagesForActiveConversation(targetId: String): List<ChatMessage> =
+        messages.filter { it.belongsToConversationThread(targetId, conversationIdFor(targetId)) }
+
+    fun lastMessageForActiveConversation(targetId: String): ChatMessage? =
+        messages.asReversed().firstOrNull { message ->
+            message.kind != MessageKind.SYSTEM && message.belongsToConversationThread(targetId, conversationIdFor(targetId))
+        }
+
     fun sendDraft() {
         val sent = consumeDraft() ?: return
         respondLocallyTo(sent)
@@ -442,13 +473,16 @@ class AgentControlStore(
         val attachments = pendingAttachments.toList()
         pendingAttachments.clear()
         draftText = ""
+        val targetId = selectedTargetId
+        val conversationId = ensureConversationFor(targetId)
         val message = ChatMessage(
             id = nextId(),
             authorId = "you",
             kind = MessageKind.USER,
             text = text.ifEmpty { "Sent ${attachments.size} attachment(s)." },
             createdAt = now(),
-            targetAgentId = selectedTargetId,
+            targetAgentId = targetId,
+            conversationId = conversationId,
             attachments = attachments,
         )
         messages.add(message)
@@ -462,14 +496,17 @@ class AgentControlStore(
     }
 
     fun outboundPayload(message: ChatMessage): OutboundMessagePayload =
-        OutboundMessagePayload(
-            text = message.text,
-            targetAgentId = message.targetAgentId ?: selectedAgentId,
-            clientMessageId = message.id,
-            attachments = message.attachments,
-            runtimeOptions = codexRuntimeSettings,
-            conversationContext = conversationContextFor(message),
-        )
+        (message.targetAgentId ?: selectedAgentId).let { targetId ->
+            OutboundMessagePayload(
+                text = message.text,
+                targetAgentId = targetId,
+                clientMessageId = message.id,
+                conversationId = message.conversationId.ifBlank { conversationIdFor(targetId) },
+                attachments = message.attachments,
+                runtimeOptions = codexRuntimeSettings,
+                conversationContext = conversationContextFor(message),
+            )
+        }
 
     fun updateCodexModel(model: String) {
         codexRuntimeSettings = codexRuntimeSettings.copy(model = model)
@@ -499,8 +536,14 @@ class AgentControlStore(
         options.isEmpty() || options.any { it.id == id }
 
     fun addRemoteReply(message: ChatMessage) {
-        messages.removeAll { it.id == message.id }
-        messages.add(message)
+        val targetId = if (message.targetAgentId == "you") message.authorId else message.targetAgentId ?: selectedTargetId
+        val normalized = if (message.conversationId.isBlank()) {
+            message.copy(conversationId = conversationIdFor(targetId))
+        } else {
+            message
+        }
+        messages.removeAll { it.id == normalized.id }
+        messages.add(normalized)
         pruneLocalMessages()
         heartbeats.add(0, HeartbeatEntry(nextId(), "bridge", "Remote message accepted.", now()))
         pruneHeartbeats()
@@ -510,9 +553,11 @@ class AgentControlStore(
     fun hasRemoteReplyFor(message: ChatMessage): Boolean {
         val targetId = message.targetAgentId ?: selectedTargetId
         val isTeam = teams.any { it.id == targetId }
+        val conversationId = message.conversationId.ifBlank { conversationIdFor(targetId) }
         return messages.any { candidate ->
             candidate.kind == MessageKind.AGENT &&
                 candidate.createdAt >= message.createdAt &&
+                candidate.belongsToConversationThread(targetId, conversationId) &&
                 if (isTeam) {
                     candidate.targetAgentId == targetId
                 } else {
@@ -539,7 +584,9 @@ class AgentControlStore(
         draftText = command.trigger
         when (command.trigger) {
             "/clear" -> {
-                messages.removeAll { it.kind != MessageKind.SYSTEM }
+                val targetId = selectedTargetId
+                val conversationId = conversationIdFor(targetId)
+                messages.removeAll { it.kind != MessageKind.SYSTEM && it.belongsToConversationThread(targetId, conversationId) }
                 persistConversation()
             }
             "/spawn" -> spawnSubagent()
@@ -571,6 +618,7 @@ class AgentControlStore(
 
     private fun respondTo(text: String, attachments: List<FileTransfer>) {
         val targetId = selectedTargetId
+        val conversationId = conversationIdFor(targetId)
         val targetTeam = teams.firstOrNull { it.id == targetId }
         if (targetTeam != null) {
             respondToTeam(targetTeam, text, attachments)
@@ -611,6 +659,7 @@ class AgentControlStore(
                 kind = MessageKind.AGENT,
                 text = responseText(agent, text, attachments),
                 createdAt = now(),
+                conversationId = conversationId,
                 toolCalls = commandTool + transferTool + listOf(
                     ToolCall(
                         id = nextId(),
@@ -653,6 +702,7 @@ class AgentControlStore(
     }
 
     private fun respondToTeam(team: AgentTeam, text: String, attachments: List<FileTransfer>) {
+        val conversationId = conversationIdFor(team.id)
         val speakers = team.memberIds.mapNotNull { memberId -> agents.firstOrNull { it.id == memberId } }.take(3)
         val summary = when {
             text.startsWith("/team") -> "${team.name}: ${team.memberIds.size} members, shared profile: ${team.sharedProfile}"
@@ -668,6 +718,7 @@ class AgentControlStore(
                 kind = MessageKind.AGENT,
                 text = summary,
                 createdAt = now(),
+                conversationId = conversationId,
                 toolCalls = listOf(
                     ToolCall(
                         id = nextId(),
@@ -734,6 +785,8 @@ class AgentControlStore(
             messages.clear()
             messages.addAll(restored.messages.takeLast(MAX_LOCAL_MESSAGES))
         }
+        activeConversationIds.clear()
+        activeConversationIds.putAll(restored.activeConversationIds)
         if (restored.documents.isNotEmpty()) {
             documents.clear()
             documents.addAll(restored.documents)
@@ -753,6 +806,7 @@ class AgentControlStore(
                 teams = teams.toList(),
                 commands = commands.toList(),
                 messages = messages.takeLast(MAX_LOCAL_MESSAGES),
+                activeConversationIds = activeConversationIds.toMap(),
                 documents = documents.toList(),
                 heartbeats = heartbeats.take(MAX_HEARTBEATS),
                 codexRuntimeSettings = codexRuntimeSettings,
@@ -776,19 +830,30 @@ class AgentControlStore(
 
     private fun conversationContextFor(current: ChatMessage): List<ChatMessage> {
         val targetId = current.targetAgentId ?: selectedTargetId
+        val conversationId = current.conversationId.ifBlank { conversationIdFor(targetId) }
         return messages
             .asSequence()
             .filter { it.id != current.id }
-            .filter { it.belongsToConversation(targetId) }
+            .filter { it.belongsToConversationThread(targetId, conversationId) }
             .sortedWith(compareBy<ChatMessage> { it.createdAt }.thenBy { it.id })
             .toList()
             .takeLast(MAX_CONTEXT_MESSAGES)
     }
 
-    private fun ChatMessage.belongsToConversation(targetId: String): Boolean {
+    fun messageBelongsToConversation(
+        message: ChatMessage,
+        targetId: String,
+        conversationId: String = conversationIdFor(targetId),
+    ): Boolean = message.belongsToConversationThread(targetId, conversationId)
+
+    private fun ChatMessage.belongsToTarget(targetId: String): Boolean {
         if (teams.any { it.id == targetId }) return targetAgentId == targetId || authorId == targetId
         return targetAgentId == targetId || authorId == targetId
     }
+
+    private fun ChatMessage.belongsToConversationThread(targetId: String, conversationId: String): Boolean =
+        belongsToTarget(targetId) &&
+            effectiveConversationId(this, targetId) == conversationId.ifBlank { defaultConversationId(targetId) }
 
     private fun pruneLocalMessages() {
         if (messages.size > MAX_LOCAL_MESSAGES) {
@@ -828,6 +893,11 @@ class AgentControlStore(
     private fun nextId(): String = UUID.randomUUID().toString()
 
     private fun now(): Long = System.currentTimeMillis()
+
+    private fun defaultConversationId(targetId: String): String = "default:$targetId"
+
+    private fun effectiveConversationId(message: ChatMessage, targetId: String): String =
+        message.conversationId.ifBlank { defaultConversationId(targetId) }
 }
 
 private fun isLocalBridgeUrl(value: String): Boolean {

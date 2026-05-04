@@ -92,6 +92,7 @@ data class OutboundMessagePayload(
     val text: String,
     val targetAgentId: String,
     val clientMessageId: String = "",
+    val conversationId: String = "",
     val attachments: List<FileTransfer> = emptyList(),
     val runtimeOptions: CodexRuntimeSettings? = null,
     val conversationContext: List<ChatMessage> = emptyList(),

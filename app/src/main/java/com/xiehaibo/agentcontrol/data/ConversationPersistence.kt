@@ -19,6 +19,7 @@ data class PersistedConversationState(
     val teams: List<AgentTeam> = emptyList(),
     val commands: List<SlashCommand> = emptyList(),
     val messages: List<ChatMessage> = emptyList(),
+    val activeConversationIds: Map<String, String> = emptyMap(),
     val documents: List<ProjectDocument> = emptyList(),
     val heartbeats: List<HeartbeatEntry> = emptyList(),
     val codexRuntimeSettings: CodexRuntimeSettings = CodexRuntimeSettings(),
