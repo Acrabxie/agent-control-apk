@@ -1465,6 +1465,9 @@ function completedToolCallsFor(agent, text, pendingCalls = [], responseCalls = [
   for (const call of normalizeResponseToolCalls(responseCalls)) {
     byKey.set(`${call.toolName}:${call.input}`, call);
   }
+  for (const call of agentTextHookCallsForAgent(agent, directiveResult.text || "", "SUCCESS")) {
+    byKey.set(`${call.toolName}:${call.input}`, call);
+  }
   const created = [...(directiveResult.createdAgents || []), ...(directiveResult.createdTeams || [])];
   if (created.length) {
     byKey.set(`agent.create:${created.map((item) => item.name).join(",")}`, toolCall(
@@ -1485,6 +1488,58 @@ function completedToolCallsFor(agent, text, pendingCalls = [], responseCalls = [
     ));
   }
   return [...byKey.values()].slice(-10);
+}
+
+function agentTextHookCallsForAgent(agent, text = "", status = "RUNNING", startedAt = Date.now()) {
+  const root = rootAdapterFor(agent);
+  const prefix = agentToolPrefix(root.id);
+  return agentTextHookCalls(agent.id, prefix, text, status, startedAt);
+}
+
+function agentTextHookCalls(agentId, prefix, text = "", status = "RUNNING", startedAt = Date.now()) {
+  const cleaned = boundedText(cleanCliReply(text), 1400);
+  if (!cleaned) return [];
+  const calls = [];
+  if (looksLikePlanText(cleaned)) {
+    calls.push(toolCall(agentId, `${prefix}.plan`, status, "agent plan", summarizeForAction(cleaned), startedAt));
+  }
+  if (looksLikeUserQuestionText(cleaned)) {
+    calls.push(toolCall(agentId, `${prefix}.ask`, status, "user confirmation", summarizeForAction(cleaned), startedAt));
+  }
+  return calls;
+}
+
+function firstAgentTextAction(agentId, text = "", status = "RUNNING", startedAt = Date.now()) {
+  const prefix = agentToolPrefix(agentId);
+  const hooks = agentTextHookCalls(agentId, prefix, text, status, startedAt);
+  const hook = hooks[0];
+  if (!hook) return null;
+  const isAsk = hook.toolName.endsWith(".ask");
+  return {
+    text: isAsk ? "Asking user..." : "Planning...",
+    toolName: hook.toolName,
+    input: hook.input,
+    output: hook.output,
+  };
+}
+
+function looksLikePlanText(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  const lower = value.toLowerCase();
+  return /(^|\n)\s*(plan|implementation plan|proposed plan|todo|next steps?)\s*[:：]/i.test(value) ||
+    /(^|\n)\s*(计划|执行计划|实现计划|方案|步骤|下一步|待办)\s*[:：]/i.test(value) ||
+    /(^|\n)\s*(\d+[\.)、]|[-*])\s+.{0,36}(检查|实现|修改|运行|验证|提交|deploy|build|test|verify|implement|update|edit|run|ship)/i.test(value) ||
+    /\b(i will|i'll|next i(?:'ll| will)|first i(?:'ll| will)|then i(?:'ll| will))\b/i.test(lower) ||
+    /(我会|我先|接下来我|然后我|第一步|第二步|最后我).{0,80}(检查|实现|修改|运行|验证|提交|刷|发布)/i.test(value);
+}
+
+function looksLikeUserQuestionText(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return false;
+  return /(\?|？)\s*$/m.test(value) ||
+    /(请确认|确认后|需要你确认|需要确认|是否继续|是否要|要不要|可以吗|行吗|对吗|选哪个|哪一个|你希望|你要我|我可以继续|我继续|批准|允许|同意)/i.test(value) ||
+    /\b(approve|approval|confirm|permission|should i|shall i|do you want me to|would you like me to|which option|continue\?)\b/i.test(value);
 }
 
 function replaceMessage(message) {
@@ -2309,9 +2364,7 @@ function createClaudeStreamProgress(progressReport, startedAt) {
   return (chunk, stream = "stdout") => {
     const text = stripAnsi(chunk);
     const line = firstLine(text);
-    const action = stream === "stdout"
-      ? { text: "Writing reply...", toolName: "claude.answer", input: "stdout received", output: "writing" }
-      : claudeActionFromText(text || line, stream);
+    const action = claudeActionFromText(text || line, stream);
     const key = `${action.toolName}:${action.input}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -2333,6 +2386,8 @@ function claudeToolCallsFromRun(stdout = "", stderr = "", startedAt = Date.now()
 
 function claudeActionFromText(text = "", stream = "stdout") {
   const line = firstLine(text) || stream;
+  const textAction = firstAgentTextAction("claude", text, "RUNNING");
+  if (textAction) return textAction;
   if (/edit|write|update|patch|save|modify|changed/i.test(line)) {
     return { text: "Editing...", toolName: "claude.edit", input: line, output: "file changes" };
   }
@@ -2383,6 +2438,15 @@ function createLineProgressSink(onLine) {
 function handleGenericAgentProgressLine(agentId, line, stream, progressReport, startedAt, seen) {
   const event = parseCodexJsonLine(line);
   if (event?.type && handleGenericJsonProgressEvent(agentId, event, progressReport, startedAt, seen)) return;
+  const prefix = agentToolPrefix(agentId);
+  const hooks = agentTextHookCalls(agentId, prefix, line, "RUNNING", startedAt);
+  if (hooks.length) {
+    const key = `${stream}:text-hooks:${hashText(line)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    progressReport(boundedText(cleanCliReply(line), 1200), hooks);
+    return;
+  }
   const action = genericAgentActionFromText(agentId, line, stream);
   const key = `${stream}:${action.toolName}:${action.input}`;
   if (seen.has(key)) return;
@@ -2420,12 +2484,13 @@ function handleGenericJsonProgressEvent(agentId, event, progressReport, startedA
   }
   const text = cleanCliReply(event.message || event.text || event.status || item.text || "");
   if (!text || event.type === "final" || event.type === "result") return false;
-  const action = genericAgentActionFromText(agentId, text, "event");
   const key = `json:text:${event.type}:${hashText(text)}`;
   if (!seen.has(key)) {
     seen.add(key);
-    progressReport(text, [
-      toolCall(agentId, `${agentToolPrefix(agentId)}.progress`, "RUNNING", event.type, summarizeForAction(text), startedAt),
+    const prefix = agentToolPrefix(agentId);
+    const hooks = agentTextHookCalls(agentId, prefix, text, "RUNNING", startedAt);
+    progressReport(text, hooks.length ? hooks : [
+      toolCall(agentId, `${prefix}.progress`, "RUNNING", event.type, summarizeForAction(text), startedAt),
     ]);
   }
   return true;
@@ -2474,6 +2539,8 @@ function genericAgentCommandAction(agentId, commandLine = "") {
 function genericAgentActionFromText(agentId, text = "", stream = "stdout") {
   const line = boundedText(firstLine(text) || stream, 260);
   const prefix = agentToolPrefix(agentId);
+  const textAction = firstAgentTextAction(agentId, text, "RUNNING");
+  if (textAction) return textAction;
   if (stream === "stdout" && !looksLikeProgressLine(line)) {
     return { text: "Writing reply...", toolName: `${prefix}.answer`, input: "stdout received", output: "writing" };
   }
@@ -2908,7 +2975,8 @@ function handleCodexJsonProgressEvent(event, progressReport, startedAt, seen) {
     const key = `agent_message:${hashText(text)}`;
     if (seen.has(key)) return;
     seen.add(key);
-    progressReport(text, [
+    const hooks = agentTextHookCalls("codex", "codex", text, "RUNNING", startedAt);
+    progressReport(text, hooks.length ? hooks : [
       toolCall("codex", "codex.progress", "RUNNING", "agent message", summarizeForAction(text), startedAt),
     ]);
     return;

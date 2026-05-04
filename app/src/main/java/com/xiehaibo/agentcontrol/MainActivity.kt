@@ -1470,6 +1470,8 @@ private fun shouldShowActionCall(toolCall: ToolCall): Boolean =
 private fun actionIcon(toolCall: ToolCall): ImageVector {
     val name = toolCall.toolName.lowercase(Locale.getDefault())
     return when {
+        "ask" in name || "question" in name || "confirm" in name -> Icons.Default.Person
+        "prompt" in name || "plan" in name -> Icons.Default.Schedule
         "context" in name || "compact" in name || "memory" in name -> Icons.Default.Memory
         "read" in name || "search" in name -> Icons.Default.Memory
         "create" in name || "spawn" in name -> Icons.Default.Folder
@@ -1491,6 +1493,7 @@ private fun actionTitle(toolCall: ToolCall, agent: AgentNode?): String {
 private fun actionVerb(toolName: String): String {
     val name = toolName.lowercase(Locale.getDefault())
     return when {
+        "ask" in name || "question" in name || "confirm" in name -> "Ask user"
         "model_fallback" in name -> "Switch model"
         "model" in name -> "Wait for model"
         "auth" in name -> "Check auth"
@@ -1539,6 +1542,7 @@ private fun isGenericProgressText(text: String): Boolean {
         "still running...",
         "waiting for model...",
         "writing reply...",
+        "asking user...",
     )
 }
 
