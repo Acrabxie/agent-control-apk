@@ -2544,6 +2544,7 @@ async function runCodexCli(prompt, settings, permission, progressReport = () => 
       "-c",
       `model_reasoning_effort=${settings.reasoningEffort}`,
       "--skip-git-repo-check",
+      "--json",
       "--cd",
       homedir(),
       "--output-last-message",
@@ -2590,42 +2591,88 @@ function createCodexStdoutProgress(progressReport, startedAt) {
   const seen = new Set();
   return (chunk) => {
     buffer += stripAnsi(chunk);
-    const lines = buffer.split("\n");
-    for (let index = 0; index < lines.length; index += 1) {
-      const marker = lines[index].trim();
-      if (marker === "exec") {
-        const commandLine = (lines[index + 1] || "").trim();
-        if (commandLine && !seen.has(`exec:${commandLine}`)) {
-          seen.add(`exec:${commandLine}`);
-          const action = codexCommandAction(commandLine);
-          progressReport(action.text, [
-            toolCall("codex", action.toolName, "RUNNING", commandLine, action.output, startedAt),
-          ]);
-        }
-      }
-      if (marker === "apply_patch") {
-        const action = codexPatchAction(lines, index);
-        if (!seen.has(`patch:${action.input}`)) {
-          seen.add(`patch:${action.input}`);
-          progressReport(action.text, [
-            toolCall("codex", action.toolName, "RUNNING", action.input, action.output, startedAt),
-          ]);
-        }
-      }
-      if (marker === "codex" && !seen.has("answer")) {
-        seen.add("answer");
-        progressReport("Writing reply...", [
-          toolCall("codex", "codex.answer", "RUNNING", "final response", "writing", startedAt),
-        ]);
-      }
-      if (/compact|compressing context|context compaction/i.test(marker) && !seen.has("compact")) {
-        seen.add("compact");
-        progressReport("Compressing context...", [
-          toolCall("codex", "codex.compact", "RUNNING", "context", marker, startedAt),
-        ]);
-      }
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      handleCodexProgressLine(line, progressReport, startedAt, seen);
+      newlineIndex = buffer.indexOf("\n");
     }
   };
+}
+
+function handleCodexProgressLine(line, progressReport, startedAt, seen) {
+  if (!line) return;
+  const event = parseCodexJsonLine(line);
+  if (event) {
+    handleCodexJsonProgressEvent(event, progressReport, startedAt, seen);
+    return;
+  }
+  handleCodexLegacyProgressLine(line, progressReport, startedAt, seen);
+}
+
+function handleCodexJsonProgressEvent(event, progressReport, startedAt, seen) {
+  const item = event.item || {};
+  if (event.type === "turn.started" && !seen.has("turn.started")) {
+    seen.add("turn.started");
+    progressReport("Preparing context...", [
+      toolCall("codex", "codex.context", "RUNNING", "conversation and workspace", "turn started", startedAt),
+    ]);
+    return;
+  }
+  if (event.type === "item.started" && item.type === "command_execution") {
+    reportCodexCommandProgress(item.command, "RUNNING", item.aggregated_output, progressReport, startedAt, seen);
+    return;
+  }
+  if (event.type === "item.completed" && item.type === "command_execution") {
+    const status = Number(item.exit_code || 0) === 0 ? "SUCCESS" : "FAILED";
+    reportCodexCommandProgress(item.command, status, item.aggregated_output, progressReport, startedAt, seen);
+    return;
+  }
+  if (event.type === "item.completed" && item.type === "agent_message") {
+    const text = boundedText(cleanCliReply(item.text || ""), 1200);
+    if (!text) return;
+    const key = `agent_message:${hashText(text)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    progressReport(text, [
+      toolCall("codex", "codex.progress", "RUNNING", "agent message", summarizeForAction(text), startedAt),
+    ]);
+    return;
+  }
+  if (event.type === "turn.completed" && !seen.has("turn.completed")) {
+    seen.add("turn.completed");
+    progressReport("Writing reply...", [
+      toolCall("codex", "codex.answer", "RUNNING", "final response", usageSummary(event.usage), startedAt),
+    ]);
+  }
+}
+
+function reportCodexCommandProgress(commandLine = "", status = "RUNNING", output = "", progressReport, startedAt, seen) {
+  const command = String(commandLine || "").trim();
+  if (!command) return;
+  const action = codexCommandAction(command);
+  const key = `command:${status}:${command}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  progressReport(status === "RUNNING" ? action.text : completedActionText(action.text, status), [
+    toolCall("codex", action.toolName, status, command, status === "RUNNING" ? action.output : summarizeForAction(output || action.output), startedAt),
+  ]);
+}
+
+function handleCodexLegacyProgressLine(marker, progressReport, startedAt, seen) {
+  if (marker === "codex" && !seen.has("answer")) {
+    seen.add("answer");
+    progressReport("Writing reply...", [
+      toolCall("codex", "codex.answer", "RUNNING", "final response", "writing", startedAt),
+    ]);
+  }
+  if (/compact|compressing context|context compaction/i.test(marker) && !seen.has("compact")) {
+    seen.add("compact");
+    progressReport("Compressing context...", [
+      toolCall("codex", "codex.compact", "RUNNING", "context", marker, startedAt),
+    ]);
+  }
 }
 
 function codexToolCallsFromRun(stdout, stderr, settings, permission, startedAt) {
@@ -2643,6 +2690,8 @@ function codexToolCallsFromRun(stdout, stderr, settings, permission, startedAt) 
 
 function parseCodexStdoutActions(stdout = "", startedAt = Date.now()) {
   const lines = String(stdout || "").split("\n");
+  const jsonActions = codexJsonActionsFromLines(lines, startedAt);
+  if (jsonActions.length) return jsonActions;
   const actions = [];
   for (let index = 0; index < lines.length; index += 1) {
     const marker = lines[index].trim();
@@ -2657,6 +2706,22 @@ function parseCodexStdoutActions(stdout = "", startedAt = Date.now()) {
     if (marker === "apply_patch") {
       const action = codexPatchAction(lines, index);
       actions.push(toolCall("codex", action.toolName, "SUCCESS", action.input, "patch applied", startedAt));
+    }
+  }
+  return actions;
+}
+
+function codexJsonActionsFromLines(lines = [], startedAt = Date.now()) {
+  const actions = [];
+  for (const line of lines) {
+    const event = parseCodexJsonLine(line);
+    const item = event?.item || {};
+    if (event?.type === "item.completed" && item.type === "command_execution") {
+      const command = String(item.command || "").trim();
+      if (!command) continue;
+      const action = codexCommandAction(command);
+      const status = Number(item.exit_code || 0) === 0 ? "SUCCESS" : "FAILED";
+      actions.push(toolCall("codex", action.toolName, status, command, summarizeForAction(item.aggregated_output || action.output), startedAt));
     }
   }
   return actions;
@@ -2687,12 +2752,58 @@ function isRetriableCodexModelError(error) {
 }
 
 function extractCodexReplyFromStdout(stdout = "") {
+  const jsonReply = lastCodexJsonAgentMessage(stdout);
+  if (jsonReply) return jsonReply;
   const marker = "\ncodex\n";
   const start = stdout.lastIndexOf(marker);
   let reply = start >= 0 ? stdout.slice(start + marker.length) : stdout;
   const tokenIndex = reply.indexOf("\ntokens used");
   if (tokenIndex >= 0) reply = reply.slice(0, tokenIndex);
   return cleanCliReply(reply);
+}
+
+function parseCodexJsonLine(line = "") {
+  const trimmed = String(line || "").trim();
+  if (!trimmed.startsWith("{")) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+function lastCodexJsonAgentMessage(stdout = "") {
+  let reply = "";
+  for (const line of String(stdout || "").split("\n")) {
+    const event = parseCodexJsonLine(line);
+    if (event?.type === "item.completed" && event.item?.type === "agent_message") {
+      reply = cleanCliReply(event.item.text || "");
+    }
+  }
+  return reply;
+}
+
+function usageSummary(usage = {}) {
+  const input = Number(usage.input_tokens || 0);
+  const output = Number(usage.output_tokens || 0);
+  if (!input && !output) return "ready";
+  return `${input}/${output} tokens`;
+}
+
+function completedActionText(text = "", status = "SUCCESS") {
+  const base = String(text || "Running...").replace(/\.\.\.$/, "");
+  return status === "FAILED" ? `${base} failed` : base;
+}
+
+function summarizeForAction(value = "") {
+  const text = cleanCliReply(value)
+    .replace(/\s+/g, " ")
+    .trim();
+  return boundedText(text || "done", 160);
+}
+
+function hashText(value = "") {
+  return createHash("sha256").update(String(value || "")).digest("hex").slice(0, 16);
 }
 
 function cleanCliReply(value = "") {

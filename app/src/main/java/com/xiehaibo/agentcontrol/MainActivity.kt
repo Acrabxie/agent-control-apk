@@ -1354,7 +1354,7 @@ private fun PulsingStatusLine(text: String) {
             .alpha(alpha),
         style = MaterialTheme.typography.bodyMedium,
         color = Color(0xFFAEB4BC),
-        maxLines = 2,
+        maxLines = 5,
         overflow = TextOverflow.Ellipsis,
     )
 }
@@ -1435,6 +1435,7 @@ private fun actionColors(agent: AgentNode?): ActionColors = when (agent?.kind) {
 
 private fun shouldShowActionCall(toolCall: ToolCall): Boolean =
     toolCall.toolName.isNotBlank() &&
+        toolCall.toolName != "codex.progress" &&
         !(toolCall.toolName == "agent.adapter" && toolCall.output.startsWith("routed to", ignoreCase = true))
 
 private fun actionIcon(toolCall: ToolCall): ImageVector {
@@ -1481,16 +1482,33 @@ private fun actionVerb(toolName: String): String {
 }
 
 private fun runningActionText(message: ChatMessage, agent: AgentNode?): String {
+    val visibleText = displayMessageText(message.text)
+    if (visibleText.isNotBlank() && !isGenericProgressText(visibleText)) {
+        return visibleText
+    }
     val running = message.toolCalls.lastOrNull { it.status == ToolStatus.RUNNING || it.status == ToolStatus.QUEUED }
     if (running != null) return actionTitle(running, agent)
-    val text = displayMessageText(message.text)
-    return if (text.isBlank()) "thinking..." else text
+    return if (visibleText.isBlank()) "thinking..." else visibleText
 }
 
 private fun actionTextColor(status: ToolStatus): Color = when (status) {
     ToolStatus.QUEUED, ToolStatus.RUNNING -> Color(0xFFAEB4BC)
     ToolStatus.SUCCESS -> Color(0xFF9AA1AA)
     ToolStatus.FAILED -> Color(0xFFD99191)
+}
+
+private fun isGenericProgressText(text: String): Boolean {
+    val normalized = text.trim().lowercase(Locale.getDefault())
+    return normalized in setOf(
+        "thinking...",
+        "thinking",
+        "preparing context...",
+        "starting codex...",
+        "running...",
+        "still running...",
+        "waiting for model...",
+        "writing reply...",
+    )
 }
 
 private fun actionDetail(toolCall: ToolCall): String =

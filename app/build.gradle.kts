@@ -16,8 +16,8 @@ android {
         applicationId = "com.xiehaibo.agentcontrol"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
-        versionName = "0.3.30"
+        versionCode = 32
+        versionName = "0.3.31"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
