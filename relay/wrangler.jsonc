@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-control-relay",
+  "main": "src/worker.mjs",
+  "compatibility_date": "2026-04-27",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOMS",
+        "class_name": "AgentControlRoom"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AgentControlRoom"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
