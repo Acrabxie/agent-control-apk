@@ -10,6 +10,11 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -94,6 +99,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -401,6 +407,7 @@ private fun ChatPanel(
     val scope = rememberCoroutineScope()
     val messageListState = rememberLazyListState()
     var openConversationId by rememberSaveable { mutableStateOf<String?>(null) }
+    var sendingMessageId by rememberSaveable { mutableStateOf<String?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
             store.queueAttachment(
@@ -614,17 +621,19 @@ private fun ChatPanel(
         PendingAttachments(store.pendingAttachments)
         Composer(
             store = store,
+            isSending = sendingMessageId != null,
             onAttachFile = { filePicker.launch(arrayOf("*/*")) },
             onAttachPhoto = { photoPicker.launch("image/*") },
             onVoiceInput = { startVoiceInput() },
             onSend = {
                 scope.launch {
                     val message = store.consumeDraft() ?: return@launch
+                    sendingMessageId = message.id
                     Log.d(BRIDGE_TAG, "queued ${message.id}: ${message.text}")
-                    requestScrollToBottom()
-                    val key = store.sessionKey
-                    if (store.pairingInfo.paired && key != null && store.deviceId.isNotBlank()) {
-                        try {
+                    try {
+                        requestScrollToBottom()
+                        val key = store.sessionKey
+                        if (store.pairingInfo.paired && key != null && store.deviceId.isNotBlank()) {
                             Log.d(BRIDGE_TAG, "send ${message.id} to ${store.pairingInfo.desktopUrl}")
                             val (reply, snapshot) = withTimeout(MESSAGE_SEND_TIMEOUT_MS) {
                                 withContext(Dispatchers.IO) {
@@ -648,26 +657,35 @@ private fun ChatPanel(
                                 store.applySnapshot(snapshot)
                             }
                             store.addRemoteReply(reply)
+                            if (sendingMessageId == message.id) {
+                                sendingMessageId = null
+                            }
                             Log.d(BRIDGE_TAG, "send ${message.id} displayed")
                             requestScrollToBottom()
                             awaitRunningReplyCompletion(reply, key)
-                        } catch (error: Throwable) {
-                            val errorText = error.message ?: "unknown error"
-                            Log.e(BRIDGE_TAG, "send ${message.id} failed", error)
-                            if (errorText.contains("session_key_mismatch") || errorText.contains("not_paired") || errorText.contains("HTTP 401")) {
-                                store.markPairingInvalid("Bridge session expired. Pair with the computer again, then resend the message.")
-                            } else {
-                                if (awaitRemoteReplyAfterSendFailure(message, key)) {
-                                    Log.d(BRIDGE_TAG, "send ${message.id} recovered from snapshot polling")
-                                } else {
-                                    store.addSystemMessage("Bridge connection is unstable. The message is still in this chat; resend if it does not finish.")
-                                }
+                        } else {
+                            store.respondLocallyTo(message)
+                            if (sendingMessageId == message.id) {
+                                sendingMessageId = null
                             }
                             requestScrollToBottom()
                         }
-                    } else {
-                        store.respondLocallyTo(message)
+                    } catch (error: Throwable) {
+                        val errorText = error.message ?: "unknown error"
+                        val key = store.sessionKey
+                        Log.e(BRIDGE_TAG, "send ${message.id} failed", error)
+                        if (errorText.contains("session_key_mismatch") || errorText.contains("not_paired") || errorText.contains("HTTP 401")) {
+                            store.markPairingInvalid("Bridge session expired. Pair with the computer again, then resend the message.")
+                        } else if (key != null && awaitRemoteReplyAfterSendFailure(message, key)) {
+                            Log.d(BRIDGE_TAG, "send ${message.id} recovered from snapshot polling")
+                        } else {
+                            store.addSystemMessage("Bridge connection is unstable. The message is still in this chat; resend if it does not finish.")
+                        }
                         requestScrollToBottom()
+                    } finally {
+                        if (sendingMessageId == message.id) {
+                            sendingMessageId = null
+                        }
                     }
                 }
             },
@@ -1164,6 +1182,8 @@ private fun AgentMessageBubble(
 
 @Composable
 private fun ThinkingMessage(agent: AgentNode?, message: ChatMessage? = null) {
+    val statusText = message?.let { runningActionText(it, agent) }
+        ?: "thinking..."
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Start,
@@ -1185,18 +1205,8 @@ private fun ThinkingMessage(agent: AgentNode?, message: ChatMessage? = null) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 fontWeight = FontWeight.SemiBold,
             )
-            Surface(
-                shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
-                color = agentBubbleColor(agent).copy(alpha = 0.72f),
-            ) {
-                Text(
-                    displayMessageText(message?.text ?: "thinking"),
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    color = Color.White.copy(alpha = 0.86f),
-                    style = MaterialTheme.typography.bodyLarge,
-                )
-            }
-            message?.let { AgentActionTrail(it.toolCalls, agent) }
+            PulsingStatusLine(statusText)
+            message?.let { AgentActionTrail(it.toolCalls, agent, includeRunning = false) }
         }
     }
 }
@@ -1205,14 +1215,17 @@ private fun ThinkingMessage(agent: AgentNode?, message: ChatMessage? = null) {
 private fun AgentActionTrail(
     toolCalls: List<ToolCall>,
     agent: AgentNode?,
+    includeRunning: Boolean = true,
 ) {
-    val visibleCalls = toolCalls.filter { shouldShowActionCall(it) }
+    val visibleCalls = toolCalls
+        .filter { shouldShowActionCall(it) && (includeRunning || it.status != ToolStatus.RUNNING) }
+        .takeLast(8)
     if (visibleCalls.isEmpty()) return
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 2.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+            .padding(top = 1.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
         visibleCalls.forEach { toolCall ->
             AgentActionRow(toolCall, agent)
@@ -1225,51 +1238,46 @@ private fun AgentActionRow(
     toolCall: ToolCall,
     agent: AgentNode?,
 ) {
-    val colors = actionColors(agent)
-    Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = colors.container,
-        border = BorderStroke(1.dp, colors.border),
+    val isRunning = toolCall.status == ToolStatus.RUNNING || toolCall.status == ToolStatus.QUEUED
+    val alpha = rememberPulseAlpha(isRunning)
+    val titleColor = actionTextColor(toolCall.status).copy(alpha = alpha)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 1.dp, vertical = 1.dp)
+            .alpha(if (isRunning) alpha else 1f),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
-            verticalAlignment = Alignment.Top,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Icon(
+            imageVector = actionIcon(toolCall),
+            contentDescription = null,
+            tint = actionTextColor(toolCall.status),
+            modifier = Modifier
+                .padding(top = 1.dp)
+                .size(14.dp),
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
-            Icon(
-                imageVector = actionIcon(toolCall),
-                contentDescription = null,
-                tint = statusColor(toolCall.status),
-                modifier = Modifier.size(16.dp),
+            Text(
+                actionTitle(toolCall, agent),
+                style = MaterialTheme.typography.labelMedium,
+                color = titleColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
+            val detail = actionDetail(toolCall)
+            if (detail.isNotBlank()) {
                 Text(
-                    actionTitle(toolCall, agent),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.title,
-                    fontWeight = FontWeight.SemiBold,
+                    detail,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color(0xFF8F969F).copy(alpha = if (isRunning) alpha else 0.72f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                val detail = actionDetail(toolCall)
-                if (detail.isNotBlank()) {
-                    Text(
-                        detail,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.detail,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
-            Text(
-                formatTime(toolCall.startedAt),
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.detail,
-            )
         }
     }
 }
@@ -1334,6 +1342,37 @@ private fun displayMessageText(value: String): String {
     val failure = failurePrefix.matchEntire(text)
     if (failure != null) return failure.groupValues[1]
     return text
+}
+
+@Composable
+private fun PulsingStatusLine(text: String) {
+    val alpha = rememberPulseAlpha(true)
+    Text(
+        text,
+        modifier = Modifier
+            .padding(horizontal = 2.dp, vertical = 5.dp)
+            .alpha(alpha),
+        style = MaterialTheme.typography.bodyMedium,
+        color = Color(0xFFAEB4BC),
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+@Composable
+private fun rememberPulseAlpha(enabled: Boolean): Float {
+    if (!enabled) return 1f
+    val transition = rememberInfiniteTransition(label = "agent-control-pulse")
+    val alpha by transition.animateFloat(
+        initialValue = 0.42f,
+        targetValue = 0.92f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1050),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "agent-control-pulse-alpha",
+    )
+    return alpha
 }
 
 @Composable
@@ -1402,41 +1441,56 @@ private fun actionIcon(toolCall: ToolCall): ImageVector {
     val name = toolCall.toolName.lowercase(Locale.getDefault())
     return when {
         "context" in name || "compact" in name || "memory" in name -> Icons.Default.Memory
+        "read" in name || "search" in name -> Icons.Default.Memory
         "create" in name || "spawn" in name -> Icons.Default.Folder
         "edit" in name || "patch" in name || "save" in name -> Icons.Default.Save
-        "run" in name || "exec" in name || "invoke" in name || "terminal" in name -> Icons.Default.Terminal
+        "run" in name || "exec" in name || "invoke" in name || "terminal" in name || "build" in name || "test" in name || "install" in name -> Icons.Default.Terminal
         else -> statusIcon(toolCall.status)
     }
 }
 
 private fun actionTitle(toolCall: ToolCall, agent: AgentNode?): String {
     val verb = actionVerb(toolCall.toolName)
-    return when (agent?.kind) {
-        AgentKind.CODEX -> "codex $verb"
-        AgentKind.CLAUDE_CODE -> "claude-code $verb"
-        AgentKind.GEMINI_CLI -> "gemini $verb"
-        AgentKind.ANTIGRAVITY -> "antigravity $verb"
-        AgentKind.OPENCODE -> "opencode $verb"
-        AgentKind.SUBAGENT, null -> verb
+    return when (toolCall.status) {
+        ToolStatus.QUEUED, ToolStatus.RUNNING -> "$verb..."
+        ToolStatus.SUCCESS -> verb
+        ToolStatus.FAILED -> "$verb failed"
     }
 }
 
 private fun actionVerb(toolName: String): String {
     val name = toolName.lowercase(Locale.getDefault())
     return when {
-        "model_fallback" in name -> "switch model"
-        "context" in name -> "prepare context"
-        "compact" in name -> "compact context"
-        "create" in name || "spawn" in name -> "create"
-        "edit" in name || "patch" in name || "save" in name -> "edit"
-        "run" in name || "exec" in name -> "run"
-        "invoke" in name -> "invoke"
-        "prompt" in name || "plan" in name -> "plan"
-        "answer" in name -> "answer"
-        "team" in name -> "team"
-        "slash" in name -> "slash command"
+        "model_fallback" in name -> "Switch model"
+        "context" in name -> "Prepare context"
+        "compact" in name -> "Compress context"
+        "create" in name || "spawn" in name -> "Create"
+        "edit" in name || "patch" in name || "save" in name || "write" in name -> "Edit"
+        "read" in name || "search" in name -> "Read"
+        "build" in name -> "Build"
+        "test" in name -> "Test"
+        "install" in name -> "Install"
+        "run" in name || "exec" in name || "terminal" in name -> "Run"
+        "invoke" in name -> "Call agent"
+        "prompt" in name || "plan" in name -> "Plan"
+        "answer" in name -> "Write reply"
+        "team" in name -> "Update team"
+        "slash" in name -> "Run command"
         else -> toolName.substringAfterLast('.').replace('_', ' ')
     }
+}
+
+private fun runningActionText(message: ChatMessage, agent: AgentNode?): String {
+    val running = message.toolCalls.lastOrNull { it.status == ToolStatus.RUNNING || it.status == ToolStatus.QUEUED }
+    if (running != null) return actionTitle(running, agent)
+    val text = displayMessageText(message.text)
+    return if (text.isBlank()) "thinking..." else text
+}
+
+private fun actionTextColor(status: ToolStatus): Color = when (status) {
+    ToolStatus.QUEUED, ToolStatus.RUNNING -> Color(0xFFAEB4BC)
+    ToolStatus.SUCCESS -> Color(0xFF9AA1AA)
+    ToolStatus.FAILED -> Color(0xFFD99191)
 }
 
 private fun actionDetail(toolCall: ToolCall): String =
@@ -1556,6 +1610,7 @@ private fun PendingAttachments(attachments: List<FileTransfer>) {
 @Composable
 private fun Composer(
     store: AgentControlStore,
+    isSending: Boolean,
     onAttachFile: () -> Unit,
     onAttachPhoto: () -> Unit,
     onVoiceInput: () -> Unit,
@@ -1569,6 +1624,7 @@ private fun Composer(
     val reasoningLabel = runtimeLabel(codex.reasoningOptions, codex.reasoningEffort, fallbackReasoningLabel(codex.reasoningEffort))
     val permissionLabel = runtimeLabel(codex.permissionOptions, codex.permissionMode, fallbackPermissionLabel(codex.permissionMode))
     val contextProgress = (codex.contextUsedTokens.toFloat() / codex.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val placeholderAlpha = rememberPulseAlpha(isSending)
     val permissionOptions = codex.permissionOptions.ifEmpty {
         listOf(
             RuntimeOption("read-only", "Read Only"),
@@ -1625,8 +1681,8 @@ private fun Composer(
                     ) {
                         if (store.draftText.isEmpty()) {
                             Text(
-                                "Message ${store.selectedTargetName()}",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                if (isSending) "Sending..." else "Message ${store.selectedTargetName()}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = placeholderAlpha),
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )

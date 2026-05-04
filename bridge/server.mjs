@@ -1153,7 +1153,7 @@ function pendingReplyFor(agent, text, replyId = id(), context = {}) {
     id: replyId,
     authorId: agent.id,
     kind: "AGENT",
-    text: `${agent.name} received your message and is thinking...`,
+    text: "Thinking...",
     createdAt: now,
     targetAgentId: "you",
     attachments: [],
@@ -1251,26 +1251,26 @@ function progressMessagesFor(adapterId, context = {}) {
     const settings = normalizeCodexRuntimeSettings(context.runtimeSettings || codexRuntimeSettings);
     return [
       {
-        text: "Preparing Codex context...",
+        text: "Preparing context...",
         toolCalls: [toolCall("codex", "codex.context", "RUNNING", "recent conversation", `${settings.contextUsedTokens}/${settings.contextLimitTokens} tokens`)],
       },
       {
-        text: "Starting desktop Codex...",
+        text: "Starting Codex...",
         toolCalls: [toolCall("codex", "codex.exec", "RUNNING", `codex exec -m ${settings.model}`, "launching CLI")],
       },
       {
-        text: "Codex is working through the request...",
+        text: "Running...",
         toolCalls: [toolCall("codex", "codex.exec", "RUNNING", `codex exec -m ${settings.model}`, "waiting for model output")],
       },
       {
-        text: "Still running; waiting for Codex to finish...",
+        text: "Still running...",
         toolCalls: [toolCall("codex", "codex.exec", "RUNNING", `codex exec -m ${settings.model}`, "long-running reply")],
       },
     ];
   }
   return [
     {
-      text: "Preparing Claude Code prompt...",
+      text: "Planning...",
       toolCalls: [toolCall("claude", "claude.plan", "RUNNING", "permission-mode plan", "building prompt")],
     },
     {
@@ -1278,11 +1278,11 @@ function progressMessagesFor(adapterId, context = {}) {
       toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "launching CLI")],
     },
     {
-      text: "Claude Code is still working...",
+      text: "Running...",
       toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "waiting for output")],
     },
     {
-      text: "Still waiting for Claude Code...",
+      text: "Still running...",
       toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "long-running reply")],
     },
   ];
@@ -2147,6 +2147,7 @@ function normalizePersistedAgent(agent) {
 async function claudeReply(text, context = {}) {
   const startedAt = Date.now();
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
+  const streamProgress = createClaudeStreamProgress(progressReport, startedAt);
   const prompt = [
     "You are Claude Code replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=claude here and returns one plain chat reply in the encrypted message.accepted envelope.",
@@ -2169,7 +2170,7 @@ async function claudeReply(text, context = {}) {
   }
 
   try {
-    progressReport("Claude Code is reading the prompt...", [
+    progressReport("Planning...", [
       toolCall("claude", "claude.plan", "RUNNING", "project settings", "preparing CLI prompt", startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise("claude", [
@@ -2189,9 +2190,8 @@ async function claudeReply(text, context = {}) {
       timeout: 45000,
       maxBuffer: 1024 * 1024 * 6,
       env: strippedAgentEnv(),
-      onStdout: () => progressReport("Claude Code produced output; preparing reply...", [
-        toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "stdout received", startedAt),
-      ]),
+      onStdout: (chunk) => streamProgress(chunk, "stdout"),
+      onStderr: (chunk) => streamProgress(chunk, "stderr"),
     });
     const reply = cleanCliReply(stdout);
     if (!reply) {
@@ -2204,6 +2204,8 @@ async function claudeReply(text, context = {}) {
     return agentResponse(reply, [
       toolCall("claude", "claude.plan", "SUCCESS", "permission-mode plan", "prepared Claude Code prompt", startedAt),
       toolCall("claude", "claude.invoke", "SUCCESS", "claude -p --output-format text", "Claude Code returned output", startedAt),
+      ...claudeToolCallsFromRun(stdout, stderr, startedAt),
+      toolCall("claude", "claude.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
   } catch (error) {
     console.error(`Claude direct reply failed: ${error.message}`);
@@ -2227,6 +2229,56 @@ function claudeAuthUnavailableReply() {
 function isClaudeAuthError(error) {
   const message = String(error?.message || "");
   return message.includes("401") || /authenticat|login|unauthorized/i.test(message);
+}
+
+function createClaudeStreamProgress(progressReport, startedAt) {
+  const seen = new Set();
+  return (chunk, stream = "stdout") => {
+    const text = stripAnsi(chunk);
+    const line = firstLine(text);
+    const action = stream === "stdout"
+      ? { text: "Writing reply...", toolName: "claude.answer", input: "stdout received", output: "writing" }
+      : claudeActionFromText(text || line, stream);
+    const key = `${action.toolName}:${action.input}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    progressReport(action.text, [
+      toolCall("claude", action.toolName, "RUNNING", action.input, action.output, startedAt),
+    ]);
+  };
+}
+
+function claudeToolCallsFromRun(stdout = "", stderr = "", startedAt = Date.now()) {
+  const calls = [];
+  void stdout;
+  for (const line of String(stderr || "").split("\n").map((item) => item.trim()).filter(Boolean)) {
+    const action = claudeActionFromText(line, "final");
+    calls.push(toolCall("claude", action.toolName, "SUCCESS", action.input, action.output, startedAt));
+  }
+  return collapseToolCalls(calls).slice(-6);
+}
+
+function claudeActionFromText(text = "", stream = "stdout") {
+  const line = firstLine(text) || stream;
+  if (/edit|write|update|patch|save|modify|changed/i.test(line)) {
+    return { text: "Editing...", toolName: "claude.edit", input: line, output: "file changes" };
+  }
+  if (/create|mkdir|new file|spawn/i.test(line)) {
+    return { text: "Creating...", toolName: "claude.create", input: line, output: "new item" };
+  }
+  if (/bash|shell|run|command|npm|gradle|pytest|test/i.test(line)) {
+    return { text: "Running...", toolName: "claude.run", input: line, output: "command" };
+  }
+  if (/read|search|grep|rg|inspect|open/i.test(line)) {
+    return { text: "Reading...", toolName: "claude.read", input: line, output: "context" };
+  }
+  if (/compact|context/i.test(line)) {
+    return { text: "Compressing context...", toolName: "claude.compact", input: line, output: "context" };
+  }
+  if (/plan|todo|think/i.test(line)) {
+    return { text: "Planning...", toolName: "claude.plan", input: line, output: "planning" };
+  }
+  return { text: "Writing reply...", toolName: "claude.answer", input: line, output: "stdout received" };
 }
 
 function setAgentStatus(agentId, status) {
@@ -2436,7 +2488,7 @@ async function codexReply(text, context = {}) {
       contextLimitTokens: modelInfo.contextLimitTokens,
     };
     try {
-      progressReport(`Starting Codex with ${model}...`, [
+      progressReport("Starting Codex...", [
         toolCall("codex", "codex.exec", "RUNNING", `codex exec -m ${model}`, `${permission.sandbox}, ${settings.reasoningEffort}`),
       ]);
       const result = await runCodexCli(prompt, attemptSettings, permission, progressReport);
@@ -2455,7 +2507,7 @@ async function codexReply(text, context = {}) {
         throw error;
       }
       fallbackCalls.push(toolCall("codex", "codex.model_fallback", "FAILED", model, firstLine(error.message)));
-      progressReport(`Codex model ${model} is unavailable; trying fallback...`, [
+      progressReport("Switching model...", [
         toolCall("codex", "codex.model_fallback", "FAILED", model, firstLine(error.message)),
       ]);
       console.error(`Codex model ${model} unavailable, trying fallback: ${firstLine(error.message)}`);
@@ -2506,7 +2558,7 @@ async function runCodexCli(prompt, settings, permission, progressReport = () => 
       onStderr: (chunk) => {
         const line = firstLine(stripAnsi(chunk));
         if (/reconnecting|model|capacity|unavailable/i.test(line)) {
-          progressReport("Codex is waiting on the model channel...", [
+          progressReport("Waiting for model...", [
             toolCall("codex", "codex.exec", "RUNNING", `codex exec -m ${settings.model}`, line, startedAt),
           ]);
         }
@@ -2519,7 +2571,7 @@ async function runCodexCli(prompt, settings, permission, progressReport = () => 
       console.error(`Codex empty reply. stdout=${tailText(stdout)} stderr=${tailText(stderr)}`);
       throw new Error("Codex CLI finished but returned no text.");
     }
-    progressReport("Codex finished; preparing final answer...", [
+    progressReport("Writing reply...", [
       toolCall("codex", "codex.answer", "RUNNING", "final response", "formatting reply", startedAt),
     ]);
     return {
@@ -2545,24 +2597,31 @@ function createCodexStdoutProgress(progressReport, startedAt) {
         const commandLine = (lines[index + 1] || "").trim();
         if (commandLine && !seen.has(`exec:${commandLine}`)) {
           seen.add(`exec:${commandLine}`);
-          progressReport("Codex is running a command...", [
-            toolCall("codex", "codex.run", "RUNNING", commandLine, "command in progress", startedAt),
+          const action = codexCommandAction(commandLine);
+          progressReport(action.text, [
+            toolCall("codex", action.toolName, "RUNNING", commandLine, action.output, startedAt),
           ]);
         }
       }
       if (marker === "apply_patch") {
-        const patchLine = (lines[index + 1] || "").trim() || "apply_patch";
-        if (!seen.has(`patch:${patchLine}`)) {
-          seen.add(`patch:${patchLine}`);
-          progressReport("Codex is editing files...", [
-            toolCall("codex", "codex.edit", "RUNNING", patchLine, "patch in progress", startedAt),
+        const action = codexPatchAction(lines, index);
+        if (!seen.has(`patch:${action.input}`)) {
+          seen.add(`patch:${action.input}`);
+          progressReport(action.text, [
+            toolCall("codex", action.toolName, "RUNNING", action.input, action.output, startedAt),
           ]);
         }
       }
       if (marker === "codex" && !seen.has("answer")) {
         seen.add("answer");
-        progressReport("Codex is writing the reply...", [
+        progressReport("Writing reply...", [
           toolCall("codex", "codex.answer", "RUNNING", "final response", "writing", startedAt),
+        ]);
+      }
+      if (/compact|compressing context|context compaction/i.test(marker) && !seen.has("compact")) {
+        seen.add("compact");
+        progressReport("Compressing context...", [
+          toolCall("codex", "codex.compact", "RUNNING", "context", marker, startedAt),
         ]);
       }
     }
@@ -2591,12 +2650,13 @@ function parseCodexStdoutActions(stdout = "", startedAt = Date.now()) {
       const commandLine = (lines[index + 1] || "").trim();
       const statusLine = (lines[index + 2] || "").trim();
       if (commandLine) {
-        actions.push(toolCall("codex", "codex.run", statusLine.includes("failed") ? "FAILED" : "SUCCESS", commandLine, statusLine || "command finished", startedAt));
+        const action = codexCommandAction(commandLine);
+        actions.push(toolCall("codex", action.toolName, statusLine.includes("failed") ? "FAILED" : "SUCCESS", commandLine, statusLine || action.output, startedAt));
       }
     }
     if (marker === "apply_patch") {
-      const patchLine = (lines[index + 1] || "").trim();
-      actions.push(toolCall("codex", "codex.edit", "SUCCESS", patchLine || "apply_patch", "patch applied", startedAt));
+      const action = codexPatchAction(lines, index);
+      actions.push(toolCall("codex", action.toolName, "SUCCESS", action.input, "patch applied", startedAt));
     }
   }
   return actions;
@@ -2647,6 +2707,40 @@ function cleanCliReply(value = "") {
     })
     .join("\n")
     .trim();
+}
+
+function codexCommandAction(commandLine = "") {
+  const command = String(commandLine || "").trim();
+  if (/(\bgradlew\b|npm\s+(run\s+)?test|pytest|testDebugUnitTest|xcodebuild\s+test)/i.test(command)) {
+    return { text: "Testing...", toolName: "codex.test", output: "test command" };
+  }
+  if (/(\bgradlew\b.*assemble|npm\s+(run\s+)?build|xcodebuild\s+build|swift\s+build)/i.test(command)) {
+    return { text: "Building...", toolName: "codex.build", output: "build command" };
+  }
+  if (/\badb\b.*(install|push)|simctl\s+install/i.test(command)) {
+    return { text: "Installing...", toolName: "codex.install", output: "device install" };
+  }
+  if (/\b(rg|sed|grep|find|ls|cat|nl|git\s+(status|show|diff|log))\b/i.test(command)) {
+    return { text: "Reading...", toolName: "codex.read", output: "repo context" };
+  }
+  if (/\b(mkdir|touch|cp|mv|git\s+clone|gh\s+repo\s+create)\b/i.test(command)) {
+    return { text: "Creating...", toolName: "codex.create", output: "filesystem command" };
+  }
+  return { text: "Running...", toolName: "codex.run", output: "command in progress" };
+}
+
+function codexPatchAction(lines = [], index = 0) {
+  const preview = lines.slice(index + 1, index + 12).join("\n");
+  const add = preview.match(/^\*\*\* Add File:\s*(.+)$/m);
+  if (add) return { text: "Creating...", toolName: "codex.create", input: add[1].trim(), output: "patch in progress" };
+  const del = preview.match(/^\*\*\* Delete File:\s*(.+)$/m);
+  if (del) return { text: "Editing...", toolName: "codex.edit", input: del[1].trim(), output: "delete patch" };
+  const update = preview.match(/^\*\*\* Update File:\s*(.+)$/m);
+  if (update) return { text: "Editing...", toolName: "codex.edit", input: update[1].trim(), output: "patch in progress" };
+  const move = preview.match(/^\*\*\* Move to:\s*(.+)$/m);
+  if (move) return { text: "Editing...", toolName: "codex.edit", input: move[1].trim(), output: "move patch" };
+  const fallback = (lines[index + 1] || "").trim() || "apply_patch";
+  return { text: "Editing...", toolName: "codex.edit", input: fallback, output: "patch in progress" };
 }
 
 function stripAnsi(value = "") {
