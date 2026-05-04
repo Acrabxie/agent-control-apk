@@ -1,9 +1,12 @@
 package com.xiehaibo.agentcontrol
 
 import android.app.Activity
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.provider.MediaStore
 import android.speech.RecognizerIntent
 import android.util.Log
 import androidx.activity.ComponentActivity
@@ -85,6 +88,7 @@ import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -403,11 +407,14 @@ private fun AgentControlApp(
 private fun ChatPanel(
     store: AgentControlStore,
 ) {
+    val context = LocalContext.current
     val focusManager = LocalFocusManager.current
     val scope = rememberCoroutineScope()
     val messageListState = rememberLazyListState()
     var openConversationId by rememberSaveable { mutableStateOf<String?>(null) }
     var sendingMessageId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingCameraName by rememberSaveable { mutableStateOf<String?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
             store.queueAttachment(
@@ -417,14 +424,19 @@ private fun ChatPanel(
             )
         }
     }
-    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri?.let {
+    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { captured ->
+        val uri = pendingCameraUri?.let(Uri::parse)
+        if (captured && uri != null) {
             store.queueAttachment(
-                uri = it.toString(),
-                name = it.bestName("photo"),
-                mimeType = "image/*",
+                uri = uri.toString(),
+                name = pendingCameraName ?: uri.bestName("photo.jpg"),
+                mimeType = "image/jpeg",
             )
+        } else if (uri != null) {
+            runCatching { context.contentResolver.delete(uri, null, null) }
         }
+        pendingCameraUri = null
+        pendingCameraName = null
     }
     val voiceLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
@@ -447,6 +459,23 @@ private fun ChatPanel(
         }
         runCatching { voiceLauncher.launch(intent) }
             .onFailure { store.addSystemMessage("Voice input is not available on this device.") }
+    }
+    fun startPhotoCapture() {
+        val name = "agent-control-${System.currentTimeMillis()}.jpg"
+        val uri = createImageCaptureUri(context, name)
+        if (uri == null) {
+            store.addSystemMessage("Camera capture is not available on this device.")
+            return
+        }
+        pendingCameraUri = uri.toString()
+        pendingCameraName = name
+        runCatching { cameraLauncher.launch(uri) }
+            .onFailure {
+                runCatching { context.contentResolver.delete(uri, null, null) }
+                pendingCameraUri = null
+                pendingCameraName = null
+                store.addSystemMessage("Camera capture is not available on this device.")
+            }
     }
     val activeAgent = openConversationId?.let { id -> store.agents.firstOrNull { it.id == id } }
     val activeTeam = openConversationId?.let { id -> store.teams.firstOrNull { it.id == id } }
@@ -623,7 +652,7 @@ private fun ChatPanel(
             store = store,
             isSending = sendingMessageId != null,
             onAttachFile = { filePicker.launch(arrayOf("*/*")) },
-            onAttachPhoto = { photoPicker.launch("image/*") },
+            onCapturePhoto = { startPhotoCapture() },
             onVoiceInput = { startVoiceInput() },
             onSend = {
                 scope.launch {
@@ -1632,26 +1661,20 @@ private fun Composer(
     store: AgentControlStore,
     isSending: Boolean,
     onAttachFile: () -> Unit,
-    onAttachPhoto: () -> Unit,
+    onCapturePhoto: () -> Unit,
     onVoiceInput: () -> Unit,
     onSend: () -> Unit,
 ) {
     val canSend = store.draftText.isNotBlank() || store.pendingAttachments.isNotEmpty()
+    var toolsMenuOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
-    var permissionMenuOpen by remember { mutableStateOf(false) }
+    var reasoningMenuOpen by remember { mutableStateOf(false) }
     val codex = store.codexRuntimeSettings
     val modelLabel = runtimeLabel(codex.modelOptions, codex.model, fallbackModelLabel(codex.model))
     val reasoningLabel = runtimeLabel(codex.reasoningOptions, codex.reasoningEffort, fallbackReasoningLabel(codex.reasoningEffort))
-    val permissionLabel = runtimeLabel(codex.permissionOptions, codex.permissionMode, fallbackPermissionLabel(codex.permissionMode))
+    val planModeEnabled = codex.permissionMode == "read-only"
     val contextProgress = (codex.contextUsedTokens.toFloat() / codex.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f)
     val placeholderAlpha = rememberPulseAlpha(isSending)
-    val permissionOptions = codex.permissionOptions.ifEmpty {
-        listOf(
-            RuntimeOption("read-only", "Read Only"),
-            RuntimeOption("workspace-write", "Workspace Write"),
-            RuntimeOption("full-access", "Full Access"),
-        )
-    }
     val modelOptions = codex.modelOptions.ifEmpty {
         listOf(
             RuntimeOption("gpt-5.5", "5.5"),
@@ -1667,6 +1690,9 @@ private fun Composer(
             RuntimeOption("high", "High"),
             RuntimeOption("xhigh", "Extra High"),
         )
+    }
+    fun setPlanMode(enabled: Boolean) {
+        store.updateCodexPermission(if (enabled) "read-only" else "workspace-write")
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1716,97 +1742,112 @@ private fun Composer(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                IconButton(onClick = onAttachFile, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.Add, contentDescription = "Attach file")
-                }
-                IconButton(onClick = onAttachPhoto, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.PhotoCamera, contentDescription = "Attach photo")
-                }
-                LazyRow(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    item {
-                        Box {
-                            TextButton(onClick = { permissionMenuOpen = true }) {
-                                Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(permissionLabel, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp))
-                            }
-                            RuntimeDropdown(
-                                expanded = permissionMenuOpen,
-                                options = permissionOptions,
-                                selectedId = codex.permissionMode,
-                                onDismiss = { permissionMenuOpen = false },
-                                onSelect = {
-                                    store.updateCodexPermission(it)
-                                    permissionMenuOpen = false
-                                },
-                            )
-                        }
+                Box {
+                    IconButton(onClick = { toolsMenuOpen = true }, modifier = Modifier.size(44.dp)) {
+                        Icon(Icons.Default.Add, contentDescription = "More actions")
                     }
-                    item {
-                        ContextMeter(
-                            progress = contextProgress,
-                            usedTokens = codex.contextUsedTokens,
-                            limitTokens = codex.contextLimitTokens,
+                    DropdownMenu(expanded = toolsMenuOpen, onDismissRequest = { toolsMenuOpen = false }) {
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text("Model", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        modelLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            },
+                            leadingIcon = { Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            trailingIcon = { Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                modelMenuOpen = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text("Reasoning", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        reasoningLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            },
+                            leadingIcon = { Icon(Icons.Default.Memory, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            trailingIcon = { Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                reasoningMenuOpen = true
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Plan mode") },
+                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            trailingIcon = {
+                                Switch(
+                                    checked = planModeEnabled,
+                                    onCheckedChange = {
+                                        setPlanMode(it)
+                                        toolsMenuOpen = false
+                                    },
+                                )
+                            },
+                            onClick = {
+                                setPlanMode(!planModeEnabled)
+                                toolsMenuOpen = false
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Take photo") },
+                            leadingIcon = { Icon(Icons.Default.PhotoCamera, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                onCapturePhoto()
+                            },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Upload file") },
+                            leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                onAttachFile()
+                            },
                         )
                     }
-                    item {
-                        Box {
-                            TextButton(onClick = { modelMenuOpen = true }) {
-                                Icon(Icons.Default.Bolt, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("$modelLabel $reasoningLabel", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp))
-                            }
-                            DropdownMenu(expanded = modelMenuOpen, onDismissRequest = { modelMenuOpen = false }) {
-                                Text(
-                                    "Model",
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                modelOptions.forEach { option ->
-                                    DropdownMenuItem(
-                                        text = { Text(option.label) },
-                                        onClick = {
-                                            store.updateCodexModel(option.id)
-                                            modelMenuOpen = false
-                                        },
-                                        trailingIcon = {
-                                            if (option.id == codex.model) {
-                                                Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                                            }
-                                        },
-                                    )
-                                }
-                                Text(
-                                    "Reasoning",
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                                reasoningOptions.forEach { option ->
-                                    DropdownMenuItem(
-                                        text = { Text(option.label) },
-                                        onClick = {
-                                            store.updateCodexReasoning(option.id)
-                                            modelMenuOpen = false
-                                        },
-                                        trailingIcon = {
-                                            if (option.id == codex.reasoningEffort) {
-                                                Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(18.dp))
-                                            }
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    RuntimeDropdown(
+                        expanded = modelMenuOpen,
+                        options = modelOptions,
+                        selectedId = codex.model,
+                        onDismiss = { modelMenuOpen = false },
+                        onSelect = {
+                            store.updateCodexModel(it)
+                            modelMenuOpen = false
+                        },
+                    )
+                    RuntimeDropdown(
+                        expanded = reasoningMenuOpen,
+                        options = reasoningOptions,
+                        selectedId = codex.reasoningEffort,
+                        onDismiss = { reasoningMenuOpen = false },
+                        onSelect = {
+                            store.updateCodexReasoning(it)
+                            reasoningMenuOpen = false
+                        },
+                    )
                 }
+                ContextMeter(
+                    progress = contextProgress,
+                    usedTokens = codex.contextUsedTokens,
+                    limitTokens = codex.contextLimitTokens,
+                )
+                Spacer(modifier = Modifier.weight(1f))
                 IconButton(onClick = onVoiceInput, modifier = Modifier.size(44.dp)) {
                     Icon(Icons.Default.Mic, contentDescription = "Voice input")
                 }
@@ -1892,13 +1933,6 @@ private fun fallbackReasoningLabel(id: String): String = when (id) {
     "medium" -> "Medium"
     "high" -> "High"
     "xhigh" -> "Extra High"
-    else -> id
-}
-
-private fun fallbackPermissionLabel(id: String): String = when (id) {
-    "read-only" -> "Read Only"
-    "workspace-write" -> "Workspace Write"
-    "full-access" -> "Full Access"
     else -> id
 }
 
@@ -2205,6 +2239,16 @@ private fun statusColor(status: ToolStatus): Color = when (status) {
 
 private fun formatTime(timestamp: Long): String =
     SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(timestamp))
+
+private fun createImageCaptureUri(context: Context, displayName: String): Uri? {
+    val values = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+    }
+    return runCatching {
+        context.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+    }.getOrNull()
+}
 
 private fun Uri.bestName(fallback: String): String =
     lastPathSegment
