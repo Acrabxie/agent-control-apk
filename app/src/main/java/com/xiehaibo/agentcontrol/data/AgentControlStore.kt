@@ -190,6 +190,7 @@ class AgentControlStore(
         ),
     )
     val activeConversationIds = mutableStateMapOf<String, String>()
+    val agentPermissionModes = mutableStateMapOf<String, String>()
 
     val documents = mutableStateListOf(
         ProjectDocument(
@@ -502,6 +503,7 @@ class AgentControlStore(
                 targetAgentId = targetId,
                 clientMessageId = message.id,
                 conversationId = message.conversationId.ifBlank { conversationIdFor(targetId) },
+                agentPermissionMode = permissionForTarget(targetId),
                 attachments = message.attachments,
                 runtimeOptions = codexRuntimeSettings,
                 conversationContext = conversationContextFor(message),
@@ -519,7 +521,20 @@ class AgentControlStore(
     }
 
     fun updateCodexPermission(permissionMode: String) {
-        codexRuntimeSettings = codexRuntimeSettings.copy(permissionMode = permissionMode)
+        updatePermissionForTarget("codex", permissionMode)
+        codexRuntimeSettings = codexRuntimeSettings.copy(permissionMode = normalizePermissionMode(permissionMode))
+        persistConversation()
+    }
+
+    fun permissionForTarget(targetId: String): String =
+        normalizePermissionMode(agentPermissionModes[targetId] ?: if (targetId == "codex") codexRuntimeSettings.permissionMode else "read-only")
+
+    fun updatePermissionForTarget(targetId: String = selectedTargetId, permissionMode: String) {
+        val normalized = normalizePermissionMode(permissionMode)
+        agentPermissionModes[targetId] = normalized
+        if (targetId == "codex") {
+            codexRuntimeSettings = codexRuntimeSettings.copy(permissionMode = normalized)
+        }
         persistConversation()
     }
 
@@ -787,6 +802,8 @@ class AgentControlStore(
         }
         activeConversationIds.clear()
         activeConversationIds.putAll(restored.activeConversationIds)
+        agentPermissionModes.clear()
+        agentPermissionModes.putAll(restored.agentPermissionModes.mapValues { normalizePermissionMode(it.value) })
         if (restored.documents.isNotEmpty()) {
             documents.clear()
             documents.addAll(restored.documents)
@@ -807,6 +824,7 @@ class AgentControlStore(
                 commands = commands.toList(),
                 messages = messages.takeLast(MAX_LOCAL_MESSAGES),
                 activeConversationIds = activeConversationIds.toMap(),
+                agentPermissionModes = agentPermissionModes.toMap(),
                 documents = documents.toList(),
                 heartbeats = heartbeats.take(MAX_HEARTBEATS),
                 codexRuntimeSettings = codexRuntimeSettings,
@@ -898,6 +916,12 @@ class AgentControlStore(
 
     private fun effectiveConversationId(message: ChatMessage, targetId: String): String =
         message.conversationId.ifBlank { defaultConversationId(targetId) }
+
+    private fun normalizePermissionMode(value: String): String =
+        when (value) {
+            "read-only", "workspace-write", "full-access" -> value
+            else -> "read-only"
+        }
 }
 
 private fun isLocalBridgeUrl(value: String): Boolean {

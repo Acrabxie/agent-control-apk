@@ -1504,6 +1504,7 @@ private fun actionVerb(toolName: String): String {
         "ask" in name || "question" in name || "confirm" in name -> "Ask user"
         "model_fallback" in name -> "Switch model"
         "model" in name -> "Wait for model"
+        "permission" in name -> "Set permissions"
         "auth" in name -> "Check auth"
         "memory" in name -> "Read memory"
         "context" in name -> "Prepare context"
@@ -1682,10 +1683,13 @@ private fun Composer(
     var toolsMenuOpen by remember { mutableStateOf(false) }
     var modelMenuOpen by remember { mutableStateOf(false) }
     var reasoningMenuOpen by remember { mutableStateOf(false) }
+    var permissionMenuOpen by remember { mutableStateOf(false) }
     val codex = store.codexRuntimeSettings
     val modelLabel = runtimeLabel(codex.modelOptions, codex.model, fallbackModelLabel(codex.model))
     val reasoningLabel = runtimeLabel(codex.reasoningOptions, codex.reasoningEffort, fallbackReasoningLabel(codex.reasoningEffort))
-    val planModeEnabled = codex.permissionMode == "read-only"
+    val targetPermission = store.permissionForTarget(store.selectedTargetId)
+    val permissionLabel = runtimeLabel(codex.permissionOptions, targetPermission, fallbackPermissionLabel(targetPermission))
+    val planModeEnabled = targetPermission == "read-only"
     val contextProgress = (codex.contextUsedTokens.toFloat() / codex.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f)
     val placeholderAlpha = rememberPulseAlpha(isSending)
     val modelOptions = codex.modelOptions.ifEmpty {
@@ -1704,8 +1708,15 @@ private fun Composer(
             RuntimeOption("xhigh", "Extra High"),
         )
     }
+    val permissionOptions = codex.permissionOptions.ifEmpty {
+        listOf(
+            RuntimeOption("read-only", "Read Only"),
+            RuntimeOption("workspace-write", "Workspace Write"),
+            RuntimeOption("full-access", "Full Access"),
+        )
+    }
     fun setPlanMode(enabled: Boolean) {
-        store.updateCodexPermission(if (enabled) "read-only" else "workspace-write")
+        store.updatePermissionForTarget(store.selectedTargetId, if (enabled) "read-only" else "workspace-write")
     }
     Surface(
         modifier = Modifier.fillMaxWidth(),
@@ -1801,6 +1812,26 @@ private fun Composer(
                             },
                         )
                         DropdownMenuItem(
+                            text = {
+                                Column {
+                                    Text("Permissions", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        permissionLabel,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            },
+                            leadingIcon = { Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                            trailingIcon = { Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            onClick = {
+                                toolsMenuOpen = false
+                                permissionMenuOpen = true
+                            },
+                        )
+                        DropdownMenuItem(
                             text = { Text("Plan mode") },
                             leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(20.dp)) },
                             trailingIcon = {
@@ -1852,6 +1883,16 @@ private fun Composer(
                         onSelect = {
                             store.updateCodexReasoning(it)
                             reasoningMenuOpen = false
+                        },
+                    )
+                    RuntimeDropdown(
+                        expanded = permissionMenuOpen,
+                        options = permissionOptions,
+                        selectedId = targetPermission,
+                        onDismiss = { permissionMenuOpen = false },
+                        onSelect = {
+                            store.updatePermissionForTarget(store.selectedTargetId, it)
+                            permissionMenuOpen = false
                         },
                     )
                 }
@@ -1946,6 +1987,13 @@ private fun fallbackReasoningLabel(id: String): String = when (id) {
     "medium" -> "Medium"
     "high" -> "High"
     "xhigh" -> "Extra High"
+    else -> id
+}
+
+private fun fallbackPermissionLabel(id: String): String = when (id) {
+    "read-only" -> "Read Only"
+    "workspace-write" -> "Workspace Write"
+    "full-access" -> "Full Access"
     else -> id
 }
 

@@ -1014,13 +1014,16 @@ async function snapshot() {
     heartbeats: state.heartbeats.slice(0, 30),
     runtimeSettings: {
       codex: codexRuntimeSnapshot(),
+      permissionOptions: CODEX_PERMISSION_OPTIONS.map(({ id, label }) => ({ id, label })),
     },
   };
 }
 
 function runtimeContextFor(agent, payload) {
+  const permissionMode = normalizeAgentPermissionMode(payload?.agentPermissionMode || payload?.runtimeOptions?.permissionMode);
   const baseContext = {
     conversationId: sanitizeText(payload?.conversationId, "", 140),
+    permissionMode,
   };
   const rootAgent = rootAdapterFor(agent);
   if (rootAgent.id !== "codex") return baseContext;
@@ -1028,6 +1031,7 @@ function runtimeContextFor(agent, payload) {
     codexRuntimeSettings = normalizeCodexRuntimeSettings({
       ...codexRuntimeSettings,
       ...payload.runtimeOptions,
+      permissionMode,
     });
     schedulePrivateBridgeStateSave();
   }
@@ -1062,6 +1066,19 @@ function normalizeCodexRuntimeSettings(value = {}) {
 
 function optionIdOrDefault(options, requested, fallback) {
   return options.some((option) => option.id === requested) ? requested : fallback;
+}
+
+function normalizeAgentPermissionMode(value, fallback = "read-only") {
+  return CODEX_PERMISSION_OPTIONS.some((option) => option.id === value) ? value : fallback;
+}
+
+function agentPermissionForContext(context = {}) {
+  return CODEX_PERMISSION_OPTIONS.find((option) => option.id === normalizeAgentPermissionMode(context.permissionMode || context.runtimeSettings?.permissionMode)) || CODEX_PERMISSION_OPTIONS[0];
+}
+
+function agentPermissionPromptLine(context = {}) {
+  const permission = agentPermissionForContext(context);
+  return `Current Agent Control permissions for this agent: ${permission.label} (${permission.id}). Read Only means inspect/plan only; Workspace Write means workspace edits are allowed; Full Access means the user allowed unrestricted local agent permissions for this turn.`;
 }
 
 function updateCodexContextEstimate() {
@@ -1448,11 +1465,13 @@ function toolCall(agentId, toolName, status, input = "", output = "", startedAt 
 
 function pendingToolCallsFor(agent, text, context = {}, now = Date.now()) {
   const adapter = rootAdapterFor(agent);
+  const permission = agentPermissionForContext(context);
   if (adapter.id === "codex") {
     const settings = normalizeCodexRuntimeSettings(context.runtimeSettings || codexRuntimeSettings);
     return [
       toolCall(agent.id, "codex.context", "SUCCESS", "recent conversation", `${settings.contextUsedTokens}/${settings.contextLimitTokens} tokens`, now),
       toolCall(agent.id, "codex.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+      toolCall(agent.id, "codex.permission", "SUCCESS", permission.label, permission.sandbox, now),
       toolCall(agent.id, "codex.exec", "RUNNING", `codex exec -m ${settings.model}`, "running desktop Codex", now),
     ];
   }
@@ -1460,6 +1479,7 @@ function pendingToolCallsFor(agent, text, context = {}, now = Date.now()) {
     return [
       toolCall(agent.id, "claude.prompt", "SUCCESS", "Claude Code prompt", "plan mode, project settings", now),
       toolCall(agent.id, "claude.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+      toolCall(agent.id, "claude.permission", "SUCCESS", permission.label, claudePermissionSummary(permission), now),
       toolCall(agent.id, "claude.invoke", "RUNNING", "claude -p", "waiting for Claude Code", now),
     ];
   }
@@ -1467,23 +1487,27 @@ function pendingToolCallsFor(agent, text, context = {}, now = Date.now()) {
     return [
       toolCall(agent.id, "gemini.prompt", "SUCCESS", "Gemini CLI prompt", "approval-mode plan", now),
       toolCall(agent.id, "gemini.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+      toolCall(agent.id, "gemini.permission", "SUCCESS", permission.label, `approval-mode ${geminiApprovalMode(permission)}`, now),
       toolCall(agent.id, "gemini.invoke", "RUNNING", "gemini --prompt", "waiting for Gemini CLI", now),
     ];
   }
   if (adapter.id === "antigravity") {
     return [
       toolCall(agent.id, "antigravity.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+      toolCall(agent.id, "antigravity.permission", "SUCCESS", permission.label, "prompt-scoped permission policy", now),
       toolCall(agent.id, "antigravity.agent", "RUNNING", "antigravity agent --json", "waiting for Antigravity", now),
     ];
   }
   if (adapter.id === "opencode") {
     return [
       toolCall(agent.id, "opencode.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+      toolCall(agent.id, "opencode.permission", "SUCCESS", permission.label, opencodePermissionSummary(permission), now),
       toolCall(agent.id, "opencode.run", "RUNNING", "opencode run", "waiting for OpenCode", now),
     ];
   }
   return [
     toolCall(agent.id, "agent.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+    toolCall(agent.id, "agent.permission", "SUCCESS", permission.label, "prompt-scoped permission policy", now),
     toolCall(agent.id, text.startsWith("/") ? "slash.command" : "agent.adapter", "RUNNING", text || "(empty)", "waiting for output", now),
   ];
 }
@@ -2380,11 +2404,13 @@ async function claudeReply(text, context = {}) {
   const startedAt = Date.now();
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createClaudeStreamProgress(progressReport, startedAt);
+  const permission = agentPermissionForContext(context);
   const prompt = [
     "You are Claude Code replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=claude here and returns one plain chat reply in the encrypted message.accepted envelope.",
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
-    "Do not edit files or run tools for ordinary chat; this bridge call is a single-turn agent reply.",
+    "Do not edit files or run tools for ordinary chat; if the user explicitly asks for actions, respect the current Agent Control permissions.",
+    agentPermissionPromptLine(context),
     ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
@@ -2404,16 +2430,13 @@ async function claudeReply(text, context = {}) {
 
   try {
     progressReport("Planning...", [
-      toolCall("claude", "claude.plan", "RUNNING", "project settings", "preparing CLI prompt", startedAt),
+      toolCall("claude", "claude.plan", "RUNNING", `permission=${permission.id}`, "preparing CLI prompt", startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise("claude", [
       "-p",
       "--output-format",
       "text",
-      "--permission-mode",
-      "plan",
-      "--tools",
-      "",
+      ...claudePermissionArgs(permission),
       "--disable-slash-commands",
       "--setting-sources",
       "project",
@@ -2435,7 +2458,7 @@ async function claudeReply(text, context = {}) {
     }
     setAgentStatus("claude", "ONLINE");
     return agentResponse(reply, [
-      toolCall("claude", "claude.plan", "SUCCESS", "permission-mode plan", "prepared Claude Code prompt", startedAt),
+      toolCall("claude", "claude.permission", "SUCCESS", permission.label, claudePermissionSummary(permission), startedAt),
       toolCall("claude", "claude.invoke", "SUCCESS", "claude -p --output-format text", "Claude Code returned output", startedAt),
       ...claudeToolCallsFromRun(stdout, stderr, startedAt),
       toolCall("claude", "claude.answer", "SUCCESS", "final response", "ready", Date.now()),
@@ -2457,6 +2480,38 @@ async function claudeReply(text, context = {}) {
 
 function claudeAuthUnavailableReply() {
   return "Claude Code CLI auth is failing with 401. Please re-login to Claude Code on this computer; Agent Control will not use another agent as a Claude fallback.";
+}
+
+function claudePermissionArgs(permission) {
+  if (permission.id === "full-access") {
+    return ["--dangerously-skip-permissions", "--tools", "default"];
+  }
+  if (permission.id === "workspace-write") {
+    return ["--permission-mode", "acceptEdits", "--tools", "default"];
+  }
+  return ["--permission-mode", "plan", "--tools", ""];
+}
+
+function claudePermissionSummary(permission) {
+  if (permission.id === "full-access") return "dangerously-skip-permissions, default tools";
+  if (permission.id === "workspace-write") return "permission-mode acceptEdits, default tools";
+  return "permission-mode plan, tools disabled";
+}
+
+function geminiApprovalMode(permission) {
+  if (permission.id === "full-access") return "yolo";
+  if (permission.id === "workspace-write") return "auto_edit";
+  return "plan";
+}
+
+function opencodePermissionArgs(permission) {
+  return permission.id === "full-access" ? ["--dangerously-skip-permissions"] : [];
+}
+
+function opencodePermissionSummary(permission) {
+  if (permission.id === "full-access") return "dangerously-skip-permissions";
+  if (permission.id === "workspace-write") return "prompt-scoped workspace-write policy";
+  return "prompt-scoped read-only policy";
 }
 
 function isClaudeAuthError(error) {
@@ -2722,6 +2777,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
   const startedAt = Date.now();
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createGenericAgentStreamProgress("antigravity", progressReport, startedAt);
+  const permission = agentPermissionForContext(context);
   if (!command) return agentResponse(`${visibleName} CLI is not available on this desktop.`, [
     toolCall("antigravity", "antigravity.agent", "FAILED", "locate CLI", "command not found", startedAt),
   ]);
@@ -2729,8 +2785,9 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
     `You are ${visibleName} replying through the Agent Control Android bridge.`,
     `API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes it to ${visibleName} and returns one plain chat reply in the encrypted message.accepted envelope.`,
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
-    "Do not edit files or run tools for ordinary chat; this bridge call is a single-turn agent reply.",
+    "Do not edit files or run tools for ordinary chat; if the user explicitly asks for actions, respect the current Agent Control permissions.",
     "Ignore prior probe prompts or stale sentinel strings in any reused desktop agent session. Answer only the current user message below.",
+    agentPermissionPromptLine(context),
     ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
@@ -2743,7 +2800,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
 
   try {
     progressReport(`Starting ${visibleName}...`, [
-      toolCall("antigravity", "antigravity.invoke", "RUNNING", `${command} agent --json`, "launching CLI", startedAt),
+      toolCall("antigravity", "antigravity.invoke", "RUNNING", `permission=${permission.id}`, "launching CLI", startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise(command, [
       "agent",
@@ -2774,6 +2831,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
       ]);
     }
     return agentResponse(reply, [
+      toolCall("antigravity", "antigravity.permission", "SUCCESS", permission.label, "prompt-scoped permission policy", startedAt),
       toolCall("antigravity", "antigravity.invoke", "SUCCESS", `${command} agent --json`, "agent returned output", startedAt),
       ...genericAgentToolCallsFromRun("antigravity", stdout, stderr, startedAt),
       toolCall("antigravity", "antigravity.answer", "SUCCESS", "final response", "ready", Date.now()),
@@ -2790,11 +2848,14 @@ async function geminiReply(text, context = {}) {
   const startedAt = Date.now();
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createGenericAgentStreamProgress("gemini_cli", progressReport, startedAt);
+  const permission = agentPermissionForContext(context);
+  const approvalMode = geminiApprovalMode(permission);
   const prompt = [
     "You are Gemini CLI replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=gemini_cli here and returns one plain chat reply in the encrypted message.accepted envelope.",
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
-    "Do not run tools or edit files for ordinary chat; this bridge call is a single-turn agent reply.",
+    "Do not run tools or edit files for ordinary chat; if the user explicitly asks for actions, respect the current Agent Control permissions.",
+    agentPermissionPromptLine(context),
     ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
@@ -2807,13 +2868,14 @@ async function geminiReply(text, context = {}) {
 
   try {
     progressReport("Starting Gemini CLI...", [
-      toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "launching CLI", startedAt),
+      toolCall("gemini_cli", "gemini.invoke", "RUNNING", `approval-mode ${approvalMode}`, "launching CLI", startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise("/bin/zsh", [
       "-lc",
-      'source "$HOME/.zshrc"; gemini --prompt "$1" --approval-mode plan --output-format text',
+      'source "$HOME/.zshrc"; gemini --prompt "$1" --approval-mode "$2" --output-format text',
       "agent-control-gemini",
       prompt,
+      approvalMode,
     ], {
       timeout: 180000,
       maxBuffer: 1024 * 1024 * 6,
@@ -2832,7 +2894,7 @@ async function geminiReply(text, context = {}) {
       ]);
     }
     return agentResponse(reply, [
-      toolCall("gemini_cli", "gemini.prompt", "SUCCESS", "approval-mode plan", "prepared Gemini prompt", startedAt),
+      toolCall("gemini_cli", "gemini.permission", "SUCCESS", permission.label, `approval-mode ${approvalMode}`, startedAt),
       toolCall("gemini_cli", "gemini.invoke", "SUCCESS", "gemini --prompt", "Gemini CLI returned output", startedAt),
       ...genericAgentToolCallsFromRun("gemini_cli", stdout, stderr, startedAt),
       toolCall("gemini_cli", "gemini.answer", "SUCCESS", "final response", "ready", Date.now()),
@@ -2849,12 +2911,14 @@ async function opencodeReply(text, context = {}) {
   const startedAt = Date.now();
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createGenericAgentStreamProgress("opencode", progressReport, startedAt);
+  const permission = agentPermissionForContext(context);
   const prompt = [
     "You are OpenCode replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=opencode here and returns one plain chat reply in the encrypted message.accepted envelope.",
     "Use the configured OpenCode default provider/model, DeepSeek V4-Pro, unless the bridge command explicitly overrides it.",
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
-    "Do not edit files or run tools for ordinary chat; this bridge call is a single-turn agent reply.",
+    "Do not edit files or run tools for ordinary chat; if the user explicitly asks for actions, respect the current Agent Control permissions.",
+    agentPermissionPromptLine(context),
     ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
@@ -2867,10 +2931,11 @@ async function opencodeReply(text, context = {}) {
 
   try {
     progressReport("Starting OpenCode...", [
-      toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "launching CLI", startedAt),
+      toolCall("opencode", "opencode.run", "RUNNING", `permission=${permission.id}`, "launching CLI", startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise("opencode", [
       "run",
+      ...opencodePermissionArgs(permission),
       "--model",
       "deepseek/deepseek-v4-pro",
       "--format",
@@ -2895,6 +2960,7 @@ async function opencodeReply(text, context = {}) {
     }
     setAgentStatus("opencode", "ONLINE");
     return agentResponse(reply, [
+      toolCall("opencode", "opencode.permission", "SUCCESS", permission.label, opencodePermissionSummary(permission), startedAt),
       toolCall("opencode", "opencode.run", "SUCCESS", "opencode run --model deepseek/deepseek-v4-pro", "OpenCode returned output", startedAt),
       ...genericAgentToolCallsFromRun("opencode", stdout, stderr, startedAt),
       toolCall("opencode", "opencode.answer", "SUCCESS", "final response", "ready", Date.now()),

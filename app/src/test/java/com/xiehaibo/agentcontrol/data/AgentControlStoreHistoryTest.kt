@@ -70,6 +70,21 @@ class AgentControlStoreHistoryTest {
         assertThat(payload.conversationContext.map { it.text }).doesNotContain("已记住 amber-thread")
     }
 
+    @Test
+    fun sendsPermissionModeForSelectedAgent() {
+        val store = AgentControlStore()
+
+        store.selectedTargetId = "claude"
+        store.updatePermissionForTarget("claude", "full-access")
+        store.draftText = "权限测试"
+        val message = store.consumeDraft()!!
+        val payload = store.outboundPayload(message)
+
+        assertThat(payload.targetAgentId).isEqualTo("claude")
+        assertThat(payload.agentPermissionMode).isEqualTo("full-access")
+        assertThat(store.permissionForTarget("codex")).isEqualTo("read-only")
+    }
+
     private class FakeConversationPersistence : ConversationPersistence {
         var state: PersistedConversationState? = null
 

@@ -93,6 +93,7 @@ data class OutboundMessagePayload(
     val targetAgentId: String,
     val clientMessageId: String = "",
     val conversationId: String = "",
+    val agentPermissionMode: String = "",
     val attachments: List<FileTransfer> = emptyList(),
     val runtimeOptions: CodexRuntimeSettings? = null,
     val conversationContext: List<ChatMessage> = emptyList(),
@@ -101,6 +102,7 @@ data class OutboundMessagePayload(
 @Serializable
 data class AgentRuntimeSettings(
     val codex: CodexRuntimeSettings = CodexRuntimeSettings(),
+    val permissionOptions: List<RuntimeOption> = emptyList(),
 )
 
 @Serializable
