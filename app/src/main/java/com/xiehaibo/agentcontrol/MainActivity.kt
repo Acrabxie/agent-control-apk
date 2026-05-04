@@ -1435,7 +1435,7 @@ private fun actionColors(agent: AgentNode?): ActionColors = when (agent?.kind) {
 
 private fun shouldShowActionCall(toolCall: ToolCall): Boolean =
     toolCall.toolName.isNotBlank() &&
-        toolCall.toolName != "codex.progress" &&
+        !toolCall.toolName.endsWith(".progress") &&
         !(toolCall.toolName == "agent.adapter" && toolCall.output.startsWith("routed to", ignoreCase = true))
 
 private fun actionIcon(toolCall: ToolCall): ImageVector {
@@ -1463,6 +1463,8 @@ private fun actionVerb(toolName: String): String {
     val name = toolName.lowercase(Locale.getDefault())
     return when {
         "model_fallback" in name -> "Switch model"
+        "model" in name -> "Wait for model"
+        "auth" in name -> "Check auth"
         "context" in name -> "Prepare context"
         "compact" in name -> "Compress context"
         "create" in name || "spawn" in name -> "Create"

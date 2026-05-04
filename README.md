@@ -5,7 +5,7 @@ Android MVP for phone-based control of local coding agents: Codex, Claude Code, 
 ## Built In
 
 - Conversational control surface for direct agent and subagent chat.
-- Natural light-gray execution/status stream alongside text output, including Codex JSONL stage messages plus running, editing, creating, build/test, model fallback, and context-compaction events.
+- Natural light-gray execution/status stream alongside text output, including Codex JSONL stage messages and Claude/Gemini/Antigravity/OpenCode stdout, stderr, and JSON event hooks for running, editing, creating, build/test, model fallback, and context-compaction events.
 - Slash commands remain available by typing `/status`, `/agents`, `/spawn`, `/team`, `/parent`, `/memory`, `/heartbeat`, `/files`, `/photo`, `/tools`, `/handoff`, `/approve`, `/pause`, `/resume`, `/stop`, `/clear`, `/api`, or `/help` in the composer.
 - Bidirectional transfer model for photos and files.
 - Team roster with one administrator and explicit parent-child agent hierarchy.

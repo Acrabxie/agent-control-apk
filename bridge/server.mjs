@@ -1207,9 +1207,6 @@ function completeReplyAsync(agent, text, pendingReply, context = {}) {
 
 function createProgressReporter(agent, pendingReply, context = {}) {
   const adapter = rootAdapterFor(agent);
-  if (!["codex", "claude"].includes(adapter.id)) {
-    return { start() {}, stop() {}, report() {} };
-  }
   let stopped = false;
   let tick = 0;
   const startedAt = Date.now();
@@ -1268,22 +1265,98 @@ function progressMessagesFor(adapterId, context = {}) {
       },
     ];
   }
+  if (adapterId === "claude") {
+    return [
+      {
+        text: "Planning...",
+        toolCalls: [toolCall("claude", "claude.plan", "RUNNING", "permission-mode plan", "building prompt")],
+      },
+      {
+        text: "Starting Claude Code...",
+        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "launching CLI")],
+      },
+      {
+        text: "Running...",
+        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "waiting for output")],
+      },
+      {
+        text: "Still running...",
+        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "long-running reply")],
+      },
+    ];
+  }
+  if (adapterId === "gemini_cli") {
+    return [
+      {
+        text: "Planning...",
+        toolCalls: [toolCall("gemini_cli", "gemini.plan", "RUNNING", "approval-mode plan", "building prompt")],
+      },
+      {
+        text: "Starting Gemini CLI...",
+        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "launching CLI")],
+      },
+      {
+        text: "Running...",
+        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "waiting for output")],
+      },
+      {
+        text: "Still running...",
+        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "long-running reply")],
+      },
+    ];
+  }
+  if (adapterId === "antigravity") {
+    return [
+      {
+        text: "Planning...",
+        toolCalls: [toolCall("antigravity", "antigravity.plan", "RUNNING", "agent prompt", "building prompt")],
+      },
+      {
+        text: "Starting Antigravity...",
+        toolCalls: [toolCall("antigravity", "antigravity.invoke", "RUNNING", "agent --json", "launching CLI")],
+      },
+      {
+        text: "Running...",
+        toolCalls: [toolCall("antigravity", "antigravity.invoke", "RUNNING", "agent --json", "waiting for output")],
+      },
+      {
+        text: "Still running...",
+        toolCalls: [toolCall("antigravity", "antigravity.invoke", "RUNNING", "agent --json", "long-running reply")],
+      },
+    ];
+  }
+  if (adapterId === "opencode") {
+    return [
+      {
+        text: "Planning...",
+        toolCalls: [toolCall("opencode", "opencode.plan", "RUNNING", "opencode prompt", "building prompt")],
+      },
+      {
+        text: "Starting OpenCode...",
+        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "launching CLI")],
+      },
+      {
+        text: "Running...",
+        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "waiting for output")],
+      },
+      {
+        text: "Still running...",
+        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "long-running reply")],
+      },
+    ];
+  }
   return [
     {
       text: "Planning...",
-      toolCalls: [toolCall("claude", "claude.plan", "RUNNING", "permission-mode plan", "building prompt")],
-    },
-    {
-      text: "Starting Claude Code...",
-      toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "launching CLI")],
+      toolCalls: [toolCall(adapterId, "agent.plan", "RUNNING", "agent prompt", "building prompt")],
     },
     {
       text: "Running...",
-      toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "waiting for output")],
+      toolCalls: [toolCall(adapterId, "agent.invoke", "RUNNING", "agent adapter", "waiting for output")],
     },
     {
       text: "Still running...",
-      toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "long-running reply")],
+      toolCalls: [toolCall(adapterId, "agent.invoke", "RUNNING", "agent adapter", "long-running reply")],
     },
   ];
 }
@@ -2281,6 +2354,179 @@ function claudeActionFromText(text = "", stream = "stdout") {
   return { text: "Writing reply...", toolName: "claude.answer", input: line, output: "stdout received" };
 }
 
+function createGenericAgentStreamProgress(agentId, progressReport, startedAt) {
+  const seen = new Set();
+  return {
+    onStdout: createLineProgressSink((line) => {
+      handleGenericAgentProgressLine(agentId, line, "stdout", progressReport, startedAt, seen);
+    }),
+    onStderr: createLineProgressSink((line) => {
+      handleGenericAgentProgressLine(agentId, line, "stderr", progressReport, startedAt, seen);
+    }),
+  };
+}
+
+function createLineProgressSink(onLine) {
+  let buffer = "";
+  return (chunk) => {
+    buffer += stripAnsi(chunk);
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line) onLine(line);
+      newlineIndex = buffer.indexOf("\n");
+    }
+  };
+}
+
+function handleGenericAgentProgressLine(agentId, line, stream, progressReport, startedAt, seen) {
+  const event = parseCodexJsonLine(line);
+  if (event?.type && handleGenericJsonProgressEvent(agentId, event, progressReport, startedAt, seen)) return;
+  const action = genericAgentActionFromText(agentId, line, stream);
+  const key = `${stream}:${action.toolName}:${action.input}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+  progressReport(action.text, [
+    toolCall(agentId, action.toolName, "RUNNING", action.input, action.output, startedAt),
+  ]);
+}
+
+function handleGenericJsonProgressEvent(agentId, event, progressReport, startedAt, seen) {
+  const item = event.item || {};
+  const command = item.command || event.command || item.input;
+  if (event.type === "item.started" && item.type === "command_execution") {
+    const action = genericAgentCommandAction(agentId, command || "command");
+    const key = `json:start:${action.toolName}:${action.input}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      progressReport(action.text, [
+        toolCall(agentId, action.toolName, "RUNNING", action.input, action.output, startedAt),
+      ]);
+    }
+    return true;
+  }
+  if (event.type === "item.completed" && item.type === "command_execution") {
+    const action = genericAgentCommandAction(agentId, command || "command");
+    const status = Number(item.exit_code || 0) === 0 ? "SUCCESS" : "FAILED";
+    const key = `json:done:${status}:${action.toolName}:${action.input}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      progressReport(completedActionText(action.text, status), [
+        toolCall(agentId, action.toolName, status, action.input, summarizeForAction(item.aggregated_output || action.output), startedAt),
+      ]);
+    }
+    return true;
+  }
+  const text = cleanCliReply(event.message || event.text || event.status || item.text || "");
+  if (!text || event.type === "final" || event.type === "result") return false;
+  const action = genericAgentActionFromText(agentId, text, "event");
+  const key = `json:text:${event.type}:${hashText(text)}`;
+  if (!seen.has(key)) {
+    seen.add(key);
+    progressReport(text, [
+      toolCall(agentId, `${agentToolPrefix(agentId)}.progress`, "RUNNING", event.type, summarizeForAction(text), startedAt),
+    ]);
+  }
+  return true;
+}
+
+function genericAgentToolCallsFromRun(agentId, stdout = "", stderr = "", startedAt = Date.now()) {
+  const calls = [];
+  for (const line of `${stdout}\n${stderr}`.split("\n").map((item) => item.trim()).filter(Boolean)) {
+    const event = parseCodexJsonLine(line);
+    const item = event?.item || {};
+    if (event?.type === "item.completed" && item.type === "command_execution") {
+      const action = genericAgentCommandAction(agentId, item.command || "command");
+      const status = Number(item.exit_code || 0) === 0 ? "SUCCESS" : "FAILED";
+      calls.push(toolCall(agentId, action.toolName, status, action.input, summarizeForAction(item.aggregated_output || action.output), startedAt));
+      continue;
+    }
+    if (line.startsWith("{") && !event?.type) continue;
+    const action = genericAgentActionFromText(agentId, line, "final");
+    if (action.toolName.endsWith(".answer")) continue;
+    calls.push(toolCall(agentId, action.toolName, "SUCCESS", action.input, action.output, startedAt));
+  }
+  return collapseToolCalls(calls).slice(-6);
+}
+
+function genericAgentCommandAction(agentId, commandLine = "") {
+  const command = String(commandLine || "").trim();
+  const prefix = agentToolPrefix(agentId);
+  if (/(\bgradlew\b|npm\s+(run\s+)?test|pytest|testDebugUnitTest|xcodebuild\s+test)/i.test(command)) {
+    return { text: "Testing...", toolName: `${prefix}.test`, input: command, output: "test command" };
+  }
+  if (/(\bgradlew\b.*assemble|npm\s+(run\s+)?build|xcodebuild\s+build|swift\s+build)/i.test(command)) {
+    return { text: "Building...", toolName: `${prefix}.build`, input: command, output: "build command" };
+  }
+  if (/\badb\b.*(install|push)|simctl\s+install/i.test(command)) {
+    return { text: "Installing...", toolName: `${prefix}.install`, input: command, output: "device install" };
+  }
+  if (/\b(rg|sed|grep|find|ls|cat|nl|git\s+(status|show|diff|log))\b/i.test(command)) {
+    return { text: "Reading...", toolName: `${prefix}.read`, input: command, output: "repo context" };
+  }
+  if (/\b(mkdir|touch|cp|mv|git\s+clone|gh\s+repo\s+create)\b/i.test(command)) {
+    return { text: "Creating...", toolName: `${prefix}.create`, input: command, output: "filesystem command" };
+  }
+  return { text: "Running...", toolName: `${prefix}.run`, input: command || "command", output: "command" };
+}
+
+function genericAgentActionFromText(agentId, text = "", stream = "stdout") {
+  const line = boundedText(firstLine(text) || stream, 260);
+  const prefix = agentToolPrefix(agentId);
+  if (stream === "stdout" && !looksLikeProgressLine(line)) {
+    return { text: "Writing reply...", toolName: `${prefix}.answer`, input: "stdout received", output: "writing" };
+  }
+  if (/auth|login|unauthorized|401/i.test(line)) {
+    return { text: "Checking auth...", toolName: `${prefix}.auth`, input: line, output: "auth" };
+  }
+  if (/model|capacity|rate.?limit|quota|retry|fallback|unavailable|waiting/i.test(line)) {
+    return { text: "Waiting for model...", toolName: `${prefix}.model`, input: line, output: "model channel" };
+  }
+  if (/edit|write|update|patch|save|modify|changed|diff/i.test(line)) {
+    return { text: "Editing...", toolName: `${prefix}.edit`, input: line, output: "file changes" };
+  }
+  if (/create|mkdir|new file|spawn|team/i.test(line)) {
+    return { text: "Creating...", toolName: `${prefix}.create`, input: line, output: "new item" };
+  }
+  if (/build|assemble|compile/i.test(line)) {
+    return { text: "Building...", toolName: `${prefix}.build`, input: line, output: "build" };
+  }
+  if (/test|pytest|junit|gradle test/i.test(line)) {
+    return { text: "Testing...", toolName: `${prefix}.test`, input: line, output: "test" };
+  }
+  if (/install|adb|device|simulator/i.test(line)) {
+    return { text: "Installing...", toolName: `${prefix}.install`, input: line, output: "device" };
+  }
+  if (/read|search|grep|rg|inspect|open|list|scan|load|context/i.test(line)) {
+    return { text: "Reading...", toolName: `${prefix}.read`, input: line, output: "context" };
+  }
+  if (/compact|compress/i.test(line)) {
+    return { text: "Compressing context...", toolName: `${prefix}.compact`, input: line, output: "context" };
+  }
+  if (/plan|todo|think|reason|approval/i.test(line)) {
+    return { text: "Planning...", toolName: `${prefix}.plan`, input: line, output: "planning" };
+  }
+  if (/run|command|shell|invoke|tool|call/i.test(line)) {
+    return { text: "Running...", toolName: `${prefix}.run`, input: line, output: "command" };
+  }
+  return { text: stream === "stderr" ? "Running..." : "Writing reply...", toolName: stream === "stderr" ? `${prefix}.run` : `${prefix}.answer`, input: line, output: stream };
+}
+
+function looksLikeProgressLine(line = "") {
+  return /^(>|info|warn|error|debug|running|starting|loading|using|calling|tool|thinking|planning|reading|writing|editing|created|updated|executing|failed|success|done|✓|✗|✔|⠋|⠙|⠹)/i.test(line) ||
+    /(\b(rg|sed|grep|find|ls|cat|git|npm|gradle|pytest|adb|claude|gemini|opencode)\b|\.kt|\.js|\.mjs|\.md|\.json|\.gradle)/i.test(line);
+}
+
+function agentToolPrefix(agentId = "agent") {
+  if (agentId === "gemini_cli") return "gemini";
+  if (agentId === "claude") return "claude";
+  if (agentId === "antigravity") return "antigravity";
+  if (agentId === "opencode") return "opencode";
+  if (agentId === "codex") return "codex";
+  return "agent";
+}
+
 function setAgentStatus(agentId, status) {
   const agent = findAgent(agentId);
   if (agent) agent.status = status;
@@ -2302,6 +2548,8 @@ async function antigravityReply(text, context = {}) {
 async function antigravityAgentReply({ visibleName, agentId, text, timeoutSeconds, context = {} }) {
   const command = antigravityCommand();
   const startedAt = Date.now();
+  const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
+  const streamProgress = createGenericAgentStreamProgress("antigravity", progressReport, startedAt);
   if (!command) return agentResponse(`${visibleName} CLI is not available on this desktop.`, [
     toolCall("antigravity", "antigravity.agent", "FAILED", "locate CLI", "command not found", startedAt),
   ]);
@@ -2321,6 +2569,9 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
   ].join("\n");
 
   try {
+    progressReport(`Starting ${visibleName}...`, [
+      toolCall("antigravity", "antigravity.invoke", "RUNNING", `${command} agent --json`, "launching CLI", startedAt),
+    ]);
     const { stdout, stderr } = await spawnFilePromise(command, [
       "agent",
       "--agent",
@@ -2339,6 +2590,8 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
         ...process.env,
         NO_COLOR: "1",
       },
+      onStdout: streamProgress.onStdout,
+      onStderr: streamProgress.onStderr,
     });
     const reply = extractAgentJsonReply(stdout);
     if (!reply) {
@@ -2348,7 +2601,9 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
       ]);
     }
     return agentResponse(reply, [
-      toolCall("antigravity", "antigravity.agent", "SUCCESS", `${command} agent --json`, "agent returned output", startedAt),
+      toolCall("antigravity", "antigravity.invoke", "SUCCESS", `${command} agent --json`, "agent returned output", startedAt),
+      ...genericAgentToolCallsFromRun("antigravity", stdout, stderr, startedAt),
+      toolCall("antigravity", "antigravity.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
   } catch (error) {
     console.error(`${visibleName} reply failed: ${error.message}`);
@@ -2360,6 +2615,8 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
 
 async function geminiReply(text, context = {}) {
   const startedAt = Date.now();
+  const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
+  const streamProgress = createGenericAgentStreamProgress("gemini_cli", progressReport, startedAt);
   const prompt = [
     "You are Gemini CLI replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=gemini_cli here and returns one plain chat reply in the encrypted message.accepted envelope.",
@@ -2375,6 +2632,9 @@ async function geminiReply(text, context = {}) {
   ].join("\n");
 
   try {
+    progressReport("Starting Gemini CLI...", [
+      toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "launching CLI", startedAt),
+    ]);
     const { stdout, stderr } = await spawnFilePromise("/bin/zsh", [
       "-lc",
       'source "$HOME/.zshrc"; gemini --prompt "$1" --approval-mode plan --output-format text',
@@ -2387,6 +2647,8 @@ async function geminiReply(text, context = {}) {
         ...process.env,
         NO_COLOR: "1",
       },
+      onStdout: streamProgress.onStdout,
+      onStderr: streamProgress.onStderr,
     });
     const reply = cleanCliReply(stdout);
     if (!reply) {
@@ -2398,6 +2660,8 @@ async function geminiReply(text, context = {}) {
     return agentResponse(reply, [
       toolCall("gemini_cli", "gemini.prompt", "SUCCESS", "approval-mode plan", "prepared Gemini prompt", startedAt),
       toolCall("gemini_cli", "gemini.invoke", "SUCCESS", "gemini --prompt", "Gemini CLI returned output", startedAt),
+      ...genericAgentToolCallsFromRun("gemini_cli", stdout, stderr, startedAt),
+      toolCall("gemini_cli", "gemini.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
   } catch (error) {
     console.error(`Gemini reply failed: ${error.message}`);
@@ -2409,6 +2673,8 @@ async function geminiReply(text, context = {}) {
 
 async function opencodeReply(text, context = {}) {
   const startedAt = Date.now();
+  const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
+  const streamProgress = createGenericAgentStreamProgress("opencode", progressReport, startedAt);
   const prompt = [
     "You are OpenCode replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=opencode here and returns one plain chat reply in the encrypted message.accepted envelope.",
@@ -2425,6 +2691,9 @@ async function opencodeReply(text, context = {}) {
   ].join("\n");
 
   try {
+    progressReport("Starting OpenCode...", [
+      toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "launching CLI", startedAt),
+    ]);
     const { stdout, stderr } = await spawnFilePromise("opencode", [
       "run",
       "--model",
@@ -2439,6 +2708,8 @@ async function opencodeReply(text, context = {}) {
         ...process.env,
         NO_COLOR: "1",
       },
+      onStdout: streamProgress.onStdout,
+      onStderr: streamProgress.onStderr,
     });
     const reply = cleanOpenCodeReply(stdout);
     if (!reply) {
@@ -2450,6 +2721,8 @@ async function opencodeReply(text, context = {}) {
     setAgentStatus("opencode", "ONLINE");
     return agentResponse(reply, [
       toolCall("opencode", "opencode.run", "SUCCESS", "opencode run --model deepseek/deepseek-v4-pro", "OpenCode returned output", startedAt),
+      ...genericAgentToolCallsFromRun("opencode", stdout, stderr, startedAt),
+      toolCall("opencode", "opencode.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
   } catch (error) {
     console.error(`OpenCode reply failed: ${error.message}`);
