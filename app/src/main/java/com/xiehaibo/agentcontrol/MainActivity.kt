@@ -1497,6 +1497,7 @@ private fun actionVerb(toolName: String): String {
         "model_fallback" in name -> "Switch model"
         "model" in name -> "Wait for model"
         "auth" in name -> "Check auth"
+        "memory" in name -> "Read memory"
         "context" in name -> "Prepare context"
         "compact" in name -> "Compress context"
         "create" in name || "spawn" in name -> "Create"

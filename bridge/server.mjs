@@ -35,6 +35,7 @@ const MAX_IN_MEMORY_MESSAGES = 800;
 const MAX_PERSISTED_MESSAGES = 500;
 const MAX_PROMPT_MEMORY_MESSAGES = 24;
 const MAX_PROMPT_MEMORY_CHARS = 1200;
+const MAX_SHARED_FILE_PROMPT_CHARS = 3200;
 const BRIDGE_ONLINE_MESSAGE = "Desktop bridge online. Pair the phone, then stream encrypted agent events.";
 const CODEX_DEFAULT_MODEL = "gpt-5.5";
 const CODEX_MODEL_OPTIONS = [
@@ -1249,7 +1250,10 @@ function progressMessagesFor(adapterId, context = {}) {
     return [
       {
         text: "Preparing context...",
-        toolCalls: [toolCall("codex", "codex.context", "RUNNING", "recent conversation", `${settings.contextUsedTokens}/${settings.contextLimitTokens} tokens`)],
+        toolCalls: [
+          toolCall("codex", "codex.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
+          toolCall("codex", "codex.context", "RUNNING", "recent conversation", `${settings.contextUsedTokens}/${settings.contextLimitTokens} tokens`),
+        ],
       },
       {
         text: "Starting Codex...",
@@ -1269,7 +1273,10 @@ function progressMessagesFor(adapterId, context = {}) {
     return [
       {
         text: "Planning...",
-        toolCalls: [toolCall("claude", "claude.plan", "RUNNING", "permission-mode plan", "building prompt")],
+        toolCalls: [
+          toolCall("claude", "claude.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
+          toolCall("claude", "claude.plan", "RUNNING", "permission-mode plan", "building prompt"),
+        ],
       },
       {
         text: "Starting Claude Code...",
@@ -1289,7 +1296,10 @@ function progressMessagesFor(adapterId, context = {}) {
     return [
       {
         text: "Planning...",
-        toolCalls: [toolCall("gemini_cli", "gemini.plan", "RUNNING", "approval-mode plan", "building prompt")],
+        toolCalls: [
+          toolCall("gemini_cli", "gemini.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
+          toolCall("gemini_cli", "gemini.plan", "RUNNING", "approval-mode plan", "building prompt"),
+        ],
       },
       {
         text: "Starting Gemini CLI...",
@@ -1309,7 +1319,10 @@ function progressMessagesFor(adapterId, context = {}) {
     return [
       {
         text: "Planning...",
-        toolCalls: [toolCall("antigravity", "antigravity.plan", "RUNNING", "agent prompt", "building prompt")],
+        toolCalls: [
+          toolCall("antigravity", "antigravity.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
+          toolCall("antigravity", "antigravity.plan", "RUNNING", "agent prompt", "building prompt"),
+        ],
       },
       {
         text: "Starting Antigravity...",
@@ -1329,7 +1342,10 @@ function progressMessagesFor(adapterId, context = {}) {
     return [
       {
         text: "Planning...",
-        toolCalls: [toolCall("opencode", "opencode.plan", "RUNNING", "opencode prompt", "building prompt")],
+        toolCalls: [
+          toolCall("opencode", "opencode.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
+          toolCall("opencode", "opencode.plan", "RUNNING", "opencode prompt", "building prompt"),
+        ],
       },
       {
         text: "Starting OpenCode...",
@@ -1348,7 +1364,10 @@ function progressMessagesFor(adapterId, context = {}) {
   return [
     {
       text: "Planning...",
-      toolCalls: [toolCall(adapterId, "agent.plan", "RUNNING", "agent prompt", "building prompt")],
+      toolCalls: [
+        toolCall(adapterId, "agent.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
+        toolCall(adapterId, "agent.plan", "RUNNING", "agent prompt", "building prompt"),
+      ],
     },
     {
       text: "Running...",
@@ -1424,32 +1443,40 @@ function pendingToolCallsFor(agent, text, context = {}, now = Date.now()) {
     const settings = normalizeCodexRuntimeSettings(context.runtimeSettings || codexRuntimeSettings);
     return [
       toolCall(agent.id, "codex.context", "SUCCESS", "recent conversation", `${settings.contextUsedTokens}/${settings.contextLimitTokens} tokens`, now),
+      toolCall(agent.id, "codex.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "codex.exec", "RUNNING", `codex exec -m ${settings.model}`, "running desktop Codex", now),
     ];
   }
   if (adapter.id === "claude") {
     return [
       toolCall(agent.id, "claude.prompt", "SUCCESS", "Claude Code prompt", "plan mode, project settings", now),
+      toolCall(agent.id, "claude.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "claude.invoke", "RUNNING", "claude -p", "waiting for Claude Code", now),
     ];
   }
   if (adapter.id === "gemini_cli") {
     return [
       toolCall(agent.id, "gemini.prompt", "SUCCESS", "Gemini CLI prompt", "approval-mode plan", now),
+      toolCall(agent.id, "gemini.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "gemini.invoke", "RUNNING", "gemini --prompt", "waiting for Gemini CLI", now),
     ];
   }
   if (adapter.id === "antigravity") {
     return [
+      toolCall(agent.id, "antigravity.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "antigravity.agent", "RUNNING", "antigravity agent --json", "waiting for Antigravity", now),
     ];
   }
   if (adapter.id === "opencode") {
     return [
+      toolCall(agent.id, "opencode.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "opencode.run", "RUNNING", "opencode run", "waiting for OpenCode", now),
     ];
   }
-  return [toolCall(agent.id, text.startsWith("/") ? "slash.command" : "agent.adapter", "RUNNING", text || "(empty)", "waiting for output", now)];
+  return [
+    toolCall(agent.id, "agent.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
+    toolCall(agent.id, text.startsWith("/") ? "slash.command" : "agent.adapter", "RUNNING", text || "(empty)", "waiting for output", now),
+  ];
 }
 
 function completedToolCallsFor(agent, text, pendingCalls = [], responseCalls = [], directiveResult = {}) {
@@ -2109,6 +2136,56 @@ function conversationMemoryLines(context = {}) {
   ];
 }
 
+function sharedAgentMemoryLines() {
+  const today = localDateString();
+  const yesterday = localDateString(Date.now() - 24 * 60 * 60 * 1000);
+  const sections = [
+    sharedMemorySection("ROLES.md", join(ROOT, "ROLES.md"), 1800),
+    sharedMemorySection("QUEUE.md", join(ROOT, "QUEUE.md"), 3600),
+    sharedMemorySection("MEMORY.md", join(ROOT, "MEMORY.md"), 5200),
+    sharedMemorySection(`daily/${today}.md`, join(ROOT, "daily", `${today}.md`), 3200),
+    sharedMemorySection(`daily/${yesterday}.md`, join(ROOT, "daily", `${yesterday}.md`), 1600),
+  ].filter(Boolean);
+  if (!sections.length) return [];
+  return [
+    "Shared agent memory bootstrap (read before answering; use this as durable local context, but do not reveal private memory unless it directly helps the user):",
+    ...sections,
+    "End shared agent memory bootstrap.",
+  ];
+}
+
+function sharedMemorySection(label, path, maxChars = MAX_SHARED_FILE_PROMPT_CHARS) {
+  const raw = readSharedMemoryFile(path);
+  if (!raw) return "";
+  return `--- ${label} ---\n${middleCompactForPrompt(raw, maxChars)}`;
+}
+
+function readSharedMemoryFile(path) {
+  try {
+    return readFileSync(path, "utf8")
+      .replace(/\u0000/g, "")
+      .trim();
+  } catch {
+    return "";
+  }
+}
+
+function middleCompactForPrompt(value = "", maxChars = MAX_SHARED_FILE_PROMPT_CHARS) {
+  const text = String(value || "").replace(/\r\n/g, "\n").trim();
+  if (text.length <= maxChars) return text;
+  const headLength = Math.floor(maxChars * 0.55);
+  const tailLength = maxChars - headLength;
+  return `${text.slice(0, headLength).trim()}\n...\n${text.slice(-tailLength).trim()}`;
+}
+
+function localDateString(timestamp = Date.now()) {
+  const date = new Date(timestamp);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function recentConversationMessages(context = {}, target = null) {
   const currentMessageId = context.currentMessageId || "";
   const teamId = context.team?.id || "";
@@ -2281,6 +2358,7 @@ async function claudeReply(text, context = {}) {
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=claude here and returns one plain chat reply in the encrypted message.accepted envelope.",
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not edit files or run tools for ordinary chat; this bridge call is a single-turn agent reply.",
+    ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
@@ -2626,6 +2704,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not edit files or run tools for ordinary chat; this bridge call is a single-turn agent reply.",
     "Ignore prior probe prompts or stale sentinel strings in any reused desktop agent session. Answer only the current user message below.",
+    ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
@@ -2689,6 +2768,7 @@ async function geminiReply(text, context = {}) {
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=gemini_cli here and returns one plain chat reply in the encrypted message.accepted envelope.",
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not run tools or edit files for ordinary chat; this bridge call is a single-turn agent reply.",
+    ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
@@ -2748,6 +2828,7 @@ async function opencodeReply(text, context = {}) {
     "Use the configured OpenCode default provider/model, DeepSeek V4-Pro, unless the bridge command explicitly overrides it.",
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not edit files or run tools for ordinary chat; this bridge call is a single-turn agent reply.",
+    ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
@@ -2809,6 +2890,7 @@ async function codexReply(text, context = {}) {
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not run tools for ordinary chat. If the user asks for code or actions, respect the current Codex mobile runtime permissions.",
     `Current Codex mobile runtime: model=${settings.model}, reasoning=${settings.reasoningEffort}, permissions=${settings.permissionMode}, context=${settings.contextUsedTokens}/${settings.contextLimitTokens} estimated tokens.`,
+    ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
