@@ -8,13 +8,13 @@ Android MVP for phone-based control of local coding agents: Codex, Claude Code, 
 - Natural light-gray execution/status stream alongside text output, including Codex JSONL stage messages and Claude/Gemini/Antigravity/OpenCode stdout, stderr, and JSON event hooks for running, editing, creating, build/test, model fallback, and context-compaction events.
 - Slash commands remain available by typing `/status`, `/agents`, `/spawn`, `/team`, `/parent`, `/memory`, `/heartbeat`, `/files`, `/photo`, `/tools`, `/handoff`, `/approve`, `/pause`, `/resume`, `/stop`, `/clear`, `/api`, or `/help` in the composer.
 - Per-agent runtime model menus: Codex, Claude Code, Gemini CLI, Antigravity/OpenClaw, OpenCode, and subagents expose the model IDs that belong to their own adapter instead of sharing Codex-only GPT choices.
-- Setup tab for testers with pairing, diagnostics, `/status`, attachment, reconnect, and copyable tester report checks.
+- Lightweight onboarding and tester diagnostics for pairing, `/status`, attachment, reconnect, and copyable tester reports without keeping a permanent setup screen in the main app.
 - Encrypted connection diagnostics for paired sessions, plus public lightweight bridge/relay health checks.
 - Agent and team detail sheets with identity, runtime controls, context meter, tools, recent action/error, and team shared material.
 - Bidirectional transfer model for photos and files.
 - Team roster with one administrator and explicit parent-child agent hierarchy.
-- Persistent subagents created by agents or `/spawn`, stored by the bridge and shown as first-class app conversations.
-- Persistent teams created by agents or `/team-create`, shown as group-chat rows with shared team material and agent-to-agent messages.
+- Persistent subagents created by agents or `/spawn`, stored by the bridge and shown as first-class app conversations; users can remove any persistent subagent with `/dismiss Name`, and parent/self agents can remove scoped children through the directive protocol.
+- Persistent teams created by agents or `/team-create`, shown as group-chat rows with shared team material and agent-to-agent messages; group rounds let all available members discuss in order and stop when the user sends `/stop` or at least one-third of members vote to stop.
 - Project panel for editing memory, queue, heartbeat, and bridge API documents.
 - Short-lived 8-digit desktop key pairing with HMAC-SHA256 proof, ECDH P-256, HKDF-SHA256, and AES-256-GCM.
 - Three connection modes with the same numeric-key pairing UX: Direct/VPN, self-hosted HTTPS relay, and optional managed relay.
@@ -105,6 +105,18 @@ AGENT_CONTROL_CREATE_SUBAGENT {"name":"ReleaseGuard","role":"release checklist m
 
 The bridge hides the directive from chat, persists the child, and broadcasts `agent.spawned` plus `team.changed`.
 
+Users can remove a persistent subagent from any conversation with:
+
+```text
+/dismiss ReleaseGuard
+```
+
+Agents can withdraw a scoped child or themselves with:
+
+```text
+AGENT_CONTROL_REMOVE_SUBAGENT {"id":"ReleaseGuard","reason":"no longer needed"}
+```
+
 ## Team Group Chats
 
 Teams are persisted by the bridge in `~/.agents/shared-agent-loop/agent-control-teams.json`. They appear in the same Chat list as agents, with a group avatar, shared profile, member list, and shared documents/material.
@@ -121,7 +133,11 @@ Agents can also post into a team without showing the directive text:
 AGENT_CONTROL_TEAM_MESSAGE {"teamId":"team-mobileops","text":"ReleaseGuard should watch the next build."}
 ```
 
-When a user sends a normal message to a team row, the bridge lets selected members answer in order, so later members see the earlier group replies.
+When a user sends a normal message to a team row, the bridge lets available members answer in order, so later members see the earlier group replies. A team round stops after `/stop` from the user or after at least one-third of participating members request stop:
+
+```text
+AGENT_CONTROL_TEAM_STOP {"reason":"blocked on user confirmation"}
+```
 
 Google Play readiness notes live in [`docs/google-play-readiness.md`](docs/google-play-readiness.md). Play Console copy lives in [`docs/play-console-submission.md`](docs/play-console-submission.md), tester instructions live in [`docs/internal-testing-guide.md`](docs/internal-testing-guide.md), and the publishable privacy policy draft lives in [`docs/privacy-policy.md`](docs/privacy-policy.md).
 

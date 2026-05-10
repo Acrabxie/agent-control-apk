@@ -36,7 +36,7 @@ http://127.0.0.1:7149
 1. Install the Google Play internal testing build.
 2. Open Agent Control.
 3. Read the two-page setup flow.
-4. Open the `Setup` tab and tap `Start pairing`.
+4. Tap `Start pairing` from onboarding or the top Pair action.
 5. Scan the QR code from the desktop page, or enter the relay/direct address and 8-digit key.
 6. Confirm the app shows paired/encrypted state.
 
@@ -46,12 +46,12 @@ Expected result:
 - The app pins the desktop fingerprint.
 - Closing and reopening the app keeps the paired state.
 
-## Setup Diagnostics Test
+## Pairing Diagnostics Test
 
-1. Open the `Setup` tab.
+1. Open Pair or the tester diagnostics entry point.
 2. Tap `Run diagnostics`.
-3. Tap `Send /status`.
-4. Tap `Copy report`.
+3. Send `/status` to an available agent.
+4. Copy the tester report.
 
 Expected result:
 
@@ -107,6 +107,35 @@ Expected result:
 
 - The new thread should not blindly include the previous conversation's local app context.
 - Shared agent memory may still be read if the desktop bridge is configured to provide it.
+
+## Subagent Removal Test
+
+1. Create or wait for a persistent subagent.
+2. In any conversation, send:
+
+```text
+/dismiss SubagentName
+```
+
+Expected result:
+
+- The subagent disappears from the chat roster after the next snapshot.
+- Team membership no longer includes the removed subagent.
+
+## Team Stop Quorum Test
+
+1. Open a team row with at least three available members.
+2. Send a normal work request and confirm multiple agents begin posting in the team thread.
+3. Send:
+
+```text
+/stop
+```
+
+Expected result:
+
+- The active team round is marked stopped and no further queued team members are started after the current agent returns.
+- If agents emit `AGENT_CONTROL_TEAM_STOP`, the round stops once at least one-third of participating members have requested stop.
 
 ## Attachment Test
 

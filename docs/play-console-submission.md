@@ -37,8 +37,9 @@ Features:
 - Per-agent model and reasoning controls when the desktop adapter supports them
 - Plan mode and permission mode controls
 - File and photo sending to the paired desktop bridge
-- Setup diagnostics and copyable tester report
+- Pairing diagnostics and copyable tester report
 - Agent/team detail pages with runtime controls and recent status
+- Persistent subagent removal and team stop quorum controls
 - Slash commands typed directly in the composer
 - Direct/VPN, self-hosted relay, and optional managed relay connection modes
 - App-private pairing and conversation persistence
@@ -51,14 +52,15 @@ The app has no ads, no analytics SDK, and no account system.
 ## Internal Testing Release Notes
 
 ```text
-Agent Control 0.3.47 internal testing build.
+Agent Control 1.0.0 internal testing build.
 
 - Pair Android with the desktop bridge by QR code or 8-digit key
 - Control local agents including Codex, Claude Code, Gemini CLI, OpenCode, and compatible adapters
 - Show agent, subagent, and team conversations
 - Show running status such as thinking, reading, editing, testing, and replying
 - Support per-agent model/reasoning controls, Plan mode, file upload, and photo sending
-- Add Setup diagnostics, tester checklist/report copy, and agent/team detail pages
+- Add persistent subagent removal, full team group rounds, and stop quorum handling
+- Keep pairing diagnostics, tester report copy, and agent/team detail pages
 - Keep first-install setup, privacy policy entry points, and Google Play release signing
 ```
 
@@ -76,7 +78,7 @@ Reviewer steps:
 1. Install and run the desktop bridge from the repository.
 2. Open http://127.0.0.1:7149 on the desktop.
 3. On Android, open Pair, scan the QR code or enter the bridge/relay address and 8-digit key.
-4. Open Setup, run diagnostics, then send /status to a local agent.
+4. Pair the phone, run diagnostics from the tester flow or Pair screen, then send /status to a local agent.
 
 If the reviewer does not install the desktop bridge, they can still inspect onboarding, pairing UI, privacy policy entry points, and app navigation. Agent replies require a paired desktop bridge.
 ```

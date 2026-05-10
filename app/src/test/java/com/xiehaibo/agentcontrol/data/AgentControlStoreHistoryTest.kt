@@ -218,6 +218,29 @@ class AgentControlStoreHistoryTest {
     }
 
     @Test
+    fun userDismissCanRemoveNamedSubagentFromAnotherRoot() {
+        val store = AgentControlStore()
+        val claudeChild = AgentNode(
+            id = "sub-releaseguard",
+            name = "ReleaseGuard",
+            kind = AgentKind.SUBAGENT,
+            role = "release monitor",
+            status = AgentStatus.ONLINE,
+            parentId = "claude",
+        )
+        store.applyRosterForTest(listOf(codexAgent(), claudeAgent(), claudeChild))
+
+        store.selectedTargetId = "codex"
+        store.draftText = "/dismiss ReleaseGuard"
+        val message = store.consumeDraft()!!
+        store.respondLocallyTo(message)
+
+        assertThat(store.agents.map { it.id }).doesNotContain("sub-releaseguard")
+        assertThat(store.teams.flatMap { it.memberIds }).doesNotContain("sub-releaseguard")
+        assertThat(store.messages.last().text).contains("Subagent removed: ReleaseGuard")
+    }
+
+    @Test
     fun runningRepliesShowTypingAndCompletionBecomesUnread() {
         val store = AgentControlStore()
         val pending = ChatMessage(
@@ -331,12 +354,12 @@ class AgentControlStoreHistoryTest {
 
         val report = store.testerReport(
             packageName = "com.acrab.agentcontrol",
-            versionName = "0.3.47",
-            versionCode = 48,
+            versionName = "1.0.0",
+            versionCode = 50,
         )
 
         assertThat(report).contains("Package: com.acrab.agentcontrol")
-        assertThat(report).contains("Version: 0.3.47 (48)")
+        assertThat(report).contains("Version: 1.0.0 (50)")
         assertThat(report).doesNotContain("12345678")
         assertThat(report).doesNotContain("secret-value")
     }

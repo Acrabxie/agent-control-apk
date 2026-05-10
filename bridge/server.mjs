@@ -136,9 +136,11 @@ const SUBAGENT_DIRECTIVE = "AGENT_CONTROL_CREATE_SUBAGENT";
 const REMOVE_SUBAGENT_DIRECTIVE = "AGENT_CONTROL_REMOVE_SUBAGENT";
 const TEAM_DIRECTIVE = "AGENT_CONTROL_CREATE_TEAM";
 const TEAM_MESSAGE_DIRECTIVE = "AGENT_CONTROL_TEAM_MESSAGE";
+const TEAM_STOP_DIRECTIVE = "AGENT_CONTROL_TEAM_STOP";
 const FILE_DIRECTIVE = "AGENT_CONTROL_SEND_FILE";
-const TEAM_ROUND_MAX_SPEAKERS = 2;
+const TEAM_ROUND_MAX_SPEAKERS = 8;
 const MAX_INLINE_AGENT_FILE_BYTES = 5 * 1024 * 1024;
+const activeTeamRounds = new Map();
 
 const commands = [
   ["/status", "Status", "team"],
@@ -1576,7 +1578,7 @@ async function routeMessage(payload) {
   if (existingReply) return existingReply;
   mergeClientConversationContext(payload.conversationContext, targetAgentId, conversationId);
   const team = findTeam(targetAgentId);
-  if (team) return await routeTeamMessage(team, payload);
+  if (team) return await routeTeamMessage(team, payload, { replyId, clientMessageId });
   const agent = findAgent(targetAgentId) || agentDefinitions[0];
   const runtimeContext = runtimeContextFor(agent, payload);
   let userMessage = clientMessageId ? state.messages.find((message) => message.id === clientMessageId) : null;
@@ -2130,12 +2132,27 @@ function replaceMessage(message) {
   pruneMessages();
 }
 
-async function routeTeamMessage(team, payload) {
+async function routeTeamMessage(team, payload, options = {}) {
   const text = String(payload.text || "").trim();
   const conversationId = sanitizeText(payload.conversationId, "", 140);
+  const slash = normalizeSlashCommandText(text);
   mergeClientConversationContext(payload.conversationContext, team.id, conversationId);
+
+  if (["/stop", "/cancel", "/abort"].includes(slash.command)) {
+    const reply = requestTeamStopFromUser(team, conversationId, text, options.replyId);
+    schedulePrivateBridgeStateSave();
+    broadcast("agent.output", reply);
+    return reply;
+  }
+  if (slash.command === "/resume") {
+    const reply = clearTeamStopFromUser(team, conversationId, text, options.replyId);
+    schedulePrivateBridgeStateSave();
+    broadcast("agent.output", reply);
+    return reply;
+  }
+
   const userMessage = {
-    id: id(),
+    id: options.clientMessageId || id(),
     authorId: "you",
     kind: "USER",
     text: text || "sent to team",
@@ -2149,52 +2166,222 @@ async function routeTeamMessage(team, payload) {
   pruneMessages();
 
   const speakers = teamSpeakers(team);
-  const replies = [];
-  for (const speaker of speakers) {
-    const response = normalizeAgentResponse(await responseFor(speaker, text, { team, currentMessageId: userMessage.id, ...runtimeContextFor(speaker, payload) }));
-    const directiveResult = await applyAgentDirectives(speaker, response.text, { currentTeam: team });
-    const reply = {
-      id: id(),
-      authorId: speaker.id,
-      kind: "AGENT",
-      text: directiveResult.text,
-      createdAt: Date.now(),
-      targetAgentId: team.id,
-      conversationId,
-      attachments: [],
-      toolCalls: completedToolCallsFor(
-        speaker,
-        text,
-        [toolCall(speaker.id, text.startsWith("/") ? "team.slash" : "team.group", "SUCCESS", text || "(empty)", `posted to ${team.name}`)],
-        response.toolCalls,
-        directiveResult,
-      ),
-    };
-    state.messages.push(reply);
-    pruneMessages();
-    replies.push(reply);
-  }
-
-  const finalReply = replies.at(-1) || {
-    id: id(),
+  const coordinator = {
+    id: options.replyId || id(),
     authorId: team.adminAgentId,
     kind: "AGENT",
-    text: `${team.name} has no available members yet.`,
+    text: speakers.length ? `${team.name} is discussing...` : `${team.name} has no available members yet.`,
     createdAt: Date.now(),
     targetAgentId: team.id,
     conversationId,
     attachments: [],
-    toolCalls: [],
+    toolCalls: [
+      toolCall(team.adminAgentId, "team.round", speakers.length ? "RUNNING" : "FAILED", text || "(empty)", speakers.length ? `${speakers.length} member(s) queued` : "no available members"),
+    ],
   };
-  if (!replies.length) {
-    state.messages.push(finalReply);
-    pruneMessages();
-  }
-  heartbeat(team.name, `Handled group message with ${speakers.length} speaker(s).`);
+  state.messages.push(coordinator);
+  pruneMessages();
+  heartbeat(team.name, `Started group message with ${speakers.length} speaker(s).`);
   updateCodexContextEstimate();
   schedulePrivateBridgeStateSave();
-  console.log(`Team message routed to ${team.name}: ${text || "(empty)"}`);
-  return finalReply;
+  if (speakers.length) {
+    completeTeamRoundAsync(team, payload, userMessage, coordinator, speakers);
+  }
+  console.log(`Team message accepted by ${team.name}: ${text || "(empty)"}`);
+  return coordinator;
+}
+
+function requestTeamStopFromUser(team, conversationId, text, replyId = id()) {
+  const active = activeTeamRounds.get(team.id);
+  if (active) {
+    active.userStopped = true;
+    active.stopReasons.push("User requested stop.");
+  }
+  const reply = {
+    id: replyId || id(),
+    authorId: team.adminAgentId,
+    kind: "AGENT",
+    text: active
+      ? `Stop requested for ${team.name}. The current team round will halt after the active agent returns.`
+      : `Stop noted for ${team.name}. No team round is currently running.`,
+    createdAt: Date.now(),
+    targetAgentId: team.id,
+    conversationId,
+    attachments: [],
+    toolCalls: [
+      toolCall(team.adminAgentId, "team.stop", "SUCCESS", text || "/stop", active ? "active round marked for stop" : "no active round"),
+    ],
+  };
+  state.messages.push(reply);
+  pruneMessages();
+  heartbeat(team.name, active ? "User requested team round stop." : "User stop noted; no active team round.");
+  return reply;
+}
+
+function clearTeamStopFromUser(team, conversationId, text, replyId = id()) {
+  const active = activeTeamRounds.get(team.id);
+  if (active) {
+    active.userStopped = false;
+    active.stopReasons = active.stopReasons.filter((reason) => reason !== "User requested stop.");
+  }
+  const reply = {
+    id: replyId || id(),
+    authorId: team.adminAgentId,
+    kind: "AGENT",
+    text: `${team.name} can continue. Send the next message to start a fresh team round.`,
+    createdAt: Date.now(),
+    targetAgentId: team.id,
+    conversationId,
+    attachments: [],
+    toolCalls: [
+      toolCall(team.adminAgentId, "team.resume", "SUCCESS", text || "/resume", "stop flag cleared"),
+    ],
+  };
+  state.messages.push(reply);
+  pruneMessages();
+  heartbeat(team.name, "Team resume acknowledged.");
+  return reply;
+}
+
+async function completeTeamRoundAsync(team, payload, userMessage, coordinator, speakers) {
+  const text = String(payload.text || "").trim();
+  const conversationId = sanitizeText(payload.conversationId, "", 140);
+  const threshold = teamStopThreshold(speakers.length);
+  const round = {
+    teamId: team.id,
+    roundId: userMessage.id,
+    userStopped: false,
+    stopRequests: new Map(),
+    stopReasons: [],
+    speakers: speakers.map((speaker) => speaker.id),
+  };
+  activeTeamRounds.set(team.id, round);
+  const replies = [];
+  try {
+    for (const speaker of speakers) {
+      if (teamRoundShouldStop(round, threshold)) break;
+      const response = normalizeAgentResponse(await responseFor(speaker, text, {
+        team,
+        teamRound: {
+          threshold,
+          memberCount: speakers.length,
+          stopRequests: round.stopRequests.size,
+        },
+        currentMessageId: userMessage.id,
+        ...runtimeContextFor(speaker, payload),
+      }));
+      const directiveResult = await applyAgentDirectives(speaker, response.text, { currentTeam: team });
+      const stopRequest = teamStopRequestFrom(speaker, response.text, directiveResult);
+      if (stopRequest) {
+        round.stopRequests.set(speaker.id, stopRequest.reason);
+        round.stopReasons.push(`${speaker.name}: ${stopRequest.reason}`);
+      }
+      const reply = {
+        id: id(),
+        authorId: speaker.id,
+        kind: "AGENT",
+        text: directiveResult.text,
+        createdAt: Date.now(),
+        targetAgentId: team.id,
+        conversationId,
+        attachments: directiveResult.attachments || [],
+        toolCalls: completedToolCallsFor(
+          speaker,
+          text,
+          [
+            toolCall(
+              speaker.id,
+              text.startsWith("/") ? "team.slash" : "team.group",
+              "SUCCESS",
+              text || "(empty)",
+              stopRequest ? `stop requested; ${round.stopRequests.size}/${threshold}` : `posted to ${team.name}`,
+            ),
+          ],
+          response.toolCalls,
+          directiveResult,
+        ),
+      };
+      state.messages.push(reply);
+      pruneMessages();
+      replies.push(reply);
+      broadcast("agent.output", reply);
+      schedulePrivateBridgeStateSave();
+    }
+
+    const stopped = teamRoundShouldStop(round, threshold);
+    const completed = {
+      ...coordinator,
+      text: stopped
+        ? `Team round stopped: ${teamStopSummary(round, threshold)}`
+        : `Team discussion complete: ${replies.length}/${speakers.length} member(s) replied.`,
+      toolCalls: [
+        toolCall(
+          team.adminAgentId,
+          "team.round",
+          stopped ? "FAILED" : "SUCCESS",
+          text || "(empty)",
+          stopped ? teamStopSummary(round, threshold) : `${replies.length}/${speakers.length} member replies`,
+          coordinator.createdAt,
+        ),
+      ],
+    };
+    replaceMessage(completed);
+    heartbeat(team.name, stopped ? `Stopped group message after ${replies.length} reply/replies.` : `Completed group message with ${replies.length} reply/replies.`);
+    updateCodexContextEstimate();
+    schedulePrivateBridgeStateSave();
+    broadcast("agent.output", completed);
+  } catch (error) {
+    const failed = {
+      ...coordinator,
+      text: `${team.name} group round failed: ${firstLine(error.message)}`,
+      toolCalls: [
+        toolCall(team.adminAgentId, "team.round", "FAILED", text || "(empty)", firstLine(error.message), coordinator.createdAt),
+      ],
+    };
+    replaceMessage(failed);
+    schedulePrivateBridgeStateSave();
+    broadcast("agent.output", failed);
+    console.error(`${team.name} team round failed: ${error.message}`);
+  } finally {
+    if (activeTeamRounds.get(team.id)?.roundId === userMessage.id) {
+      activeTeamRounds.delete(team.id);
+    }
+  }
+}
+
+function teamStopThreshold(memberCount) {
+  return Math.max(1, Math.ceil(Math.max(1, memberCount) / 3));
+}
+
+function teamRoundShouldStop(round, threshold) {
+  return Boolean(round?.userStopped) || Number(round?.stopRequests?.size || 0) >= threshold;
+}
+
+function teamStopSummary(round, threshold) {
+  if (round?.userStopped) return "user requested stop";
+  const reasons = round?.stopReasons?.slice(-3).join("; ");
+  return `${round?.stopRequests?.size || 0}/${threshold} stop request(s) reached quorum${reasons ? ` (${reasons})` : ""}`;
+}
+
+function teamStopRequestFrom(speaker, rawText = "", directiveResult = {}) {
+  const directive = (directiveResult.teamStopRequests || [])[0];
+  if (directive) {
+    return {
+      agentId: speaker.id,
+      reason: sanitizeText(directive.reason || directive.message || directive.text || "agent requested stop", "agent requested stop", 180),
+    };
+  }
+  const reason = inferredTeamStopReason(rawText);
+  return reason ? { agentId: speaker.id, reason } : null;
+}
+
+function inferredTeamStopReason(text = "") {
+  const value = String(text || "").trim();
+  if (!value) return "";
+  if (/(do not stop|don't stop|不要停止|不用停止|继续执行|keep going)/i.test(value)) return "";
+  const match = value.match(/(?:\[STOP\]|STOP_REQUEST|vote\s+to\s+stop|request\s+stop|halt\s+this\s+(?:round|work)|请求停止|投票停止|建议停止|需要停止)(?:[:：-]\s*)?([^\n]{0,160})/i);
+  if (!match) return "";
+  return sanitizeText(match[1] || firstLine(value), "agent requested stop", 180);
 }
 
 function mergeClientConversationContext(messages = [], targetId = "", conversationId = "") {
@@ -2354,7 +2541,7 @@ async function responseFor(agent, text, extraContext = {}) {
       : `Persistent subagent already exists: ${result.agent.name}.`;
   }
   if (command === "/dismiss") {
-    const result = await removePersistentSubagent(agent, parseRemoveSubagentCommand(slash.normalizedText, agent));
+    const result = await removePersistentSubagent(agent, parseRemoveSubagentCommand(slash.normalizedText, agent), { userRequested: true });
     return result.removed
       ? `Removed persistent subagent: ${result.agent.name}${result.removedIds.length > 1 ? ` and ${result.removedIds.length - 1} child subagent(s)` : ""}.`
       : `No subagent removed: ${result.reason || "specify a subagent name or id."}`;
@@ -2593,7 +2780,7 @@ function parseRemoveSubagentCommand(text, actor) {
 }
 
 async function applyAgentDirectives(actor, responseText, options = {}) {
-  const { text, subagentSpecs, removeSubagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs } = parseAgentDirectives(responseText);
+  const { text, subagentSpecs, removeSubagentSpecs, teamSpecs, teamMessageSpecs, teamStopSpecs, fileSpecs } = parseAgentDirectives(responseText);
   const createdAgents = [];
   const existingAgents = [];
   const removedAgents = [];
@@ -2601,6 +2788,7 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
   const createdTeams = [];
   const existingTeams = [];
   const postedTeamMessages = [];
+  const teamStopRequests = [];
   const attachments = [];
 
   for (const spec of subagentSpecs) {
@@ -2622,6 +2810,9 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
     const message = await addTeamMessage(actor, spec, options.currentTeam);
     if (message) postedTeamMessages.push(message);
   }
+  for (const spec of teamStopSpecs) {
+    teamStopRequests.push(spec);
+  }
   for (const spec of fileSpecs) {
     const transfer = await agentFileTransfer(actor, spec);
     if (transfer) attachments.push(transfer);
@@ -2635,6 +2826,7 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
     ...createdTeams.map((team) => `Created persistent team: ${team.name}.`),
     ...existingTeams.map((team) => `Persistent team already exists: ${team.name}.`),
     ...postedTeamMessages.map((message) => `Posted to team: ${findTeam(message.targetAgentId)?.name || message.targetAgentId}.`),
+    ...teamStopRequests.map((spec) => `Requested team stop: ${sanitizeText(spec.reason || spec.message || spec.text, "agent requested stop", 180)}.`),
     ...attachments.map((transfer) => `Sent file: ${transfer.name}.`),
   ];
   return {
@@ -2643,6 +2835,7 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
     removedAgents,
     createdTeams,
     postedTeamMessages,
+    teamStopRequests,
     attachments,
   };
 }
@@ -2652,6 +2845,7 @@ function parseAgentDirectives(value) {
   const removeSubagentSpecs = [];
   const teamSpecs = [];
   const teamMessageSpecs = [];
+  const teamStopSpecs = [];
   const fileSpecs = [];
   const lines = String(value || "").split("\n");
   const visible = [];
@@ -2673,6 +2867,10 @@ function parseAgentDirectives(value) {
       const raw = trimmed.slice(TEAM_MESSAGE_DIRECTIVE.length).trim();
       const parsed = parseJsonSpec(raw) || { text: raw };
       teamMessageSpecs.push(parsed);
+    } else if (trimmed.startsWith(TEAM_STOP_DIRECTIVE)) {
+      const raw = trimmed.slice(TEAM_STOP_DIRECTIVE.length).trim();
+      const parsed = parseJsonSpec(raw) || { reason: raw };
+      teamStopSpecs.push(parsed);
     } else if (trimmed.startsWith(FILE_DIRECTIVE)) {
       const raw = trimmed.slice(FILE_DIRECTIVE.length).trim();
       const parsed = parseJsonSpec(raw) || { path: raw };
@@ -2681,7 +2879,7 @@ function parseAgentDirectives(value) {
       visible.push(line);
     }
   }
-  return { text: visible.join("\n"), subagentSpecs, removeSubagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs };
+  return { text: visible.join("\n"), subagentSpecs, removeSubagentSpecs, teamSpecs, teamMessageSpecs, teamStopSpecs, fileSpecs };
 }
 
 async function applySubagentDirectives(parent, responseText) {
@@ -2729,12 +2927,12 @@ async function createPersistentSubagent(parent, spec = {}) {
   return { agent: child, created: true };
 }
 
-async function removePersistentSubagent(actor, spec = {}) {
-  const target = resolveSubagentRemovalTarget(actor, spec);
+async function removePersistentSubagent(actor, spec = {}, options = {}) {
+  const target = resolveSubagentRemovalTarget(actor, spec, options);
   if (!target) {
     return { removed: false, reason: "matching persistent subagent not found", removedIds: [] };
   }
-  if (!canRemoveSubagent(actor, target)) {
+  if (!options.userRequested && !canRemoveSubagent(actor, target)) {
     return { removed: false, reason: `${actor.name} cannot remove ${target.name}`, agent: target, removedIds: [] };
   }
 
@@ -2756,18 +2954,23 @@ async function removePersistentSubagent(actor, spec = {}) {
   return { removed: true, agent: target, removedIds };
 }
 
-function resolveSubagentRemovalTarget(actor, spec = {}) {
+function resolveSubagentRemovalTarget(actor, spec = {}, options = {}) {
   const idValue = sanitizeText(spec.id || spec.agentId || spec.subagentId || spec.targetId, "", 80);
   const nameValue = sanitizeText(spec.name || spec.agent || spec.subagent || spec.target || spec.label, "", 80);
   if (!idValue && !nameValue && actor?.kind === "SUBAGENT") return actor;
-  const loweredName = nameValue.toLowerCase();
-  const slugName = slugify(nameValue);
+  const targetValues = [idValue, nameValue].filter(Boolean);
+  const loweredNames = new Set(targetValues.map((value) => value.toLowerCase()));
+  const slugNames = new Set(targetValues.map(slugify).filter(Boolean));
   const candidates = state.dynamicAgents.filter((agent) => {
     if (idValue && agent.id === idValue) return true;
-    if (!nameValue) return false;
-    return agent.name.toLowerCase() === loweredName || slugify(agent.name) === slugName;
+    if (!targetValues.length) return false;
+    return targetValues.includes(agent.id) ||
+      loweredNames.has(agent.name.toLowerCase()) ||
+      slugNames.has(slugify(agent.name));
   });
-  return candidates.find((agent) => canRemoveSubagent(actor, agent)) || candidates[0] || null;
+  return options.userRequested
+    ? candidates[0] || null
+    : candidates.find((agent) => canRemoveSubagent(actor, agent)) || candidates[0] || null;
 }
 
 function canRemoveSubagent(actor, target) {
@@ -2958,14 +3161,12 @@ function teamSpeakers(team) {
     .filter(Boolean);
   const admin = findAgent(team.adminAgentId);
   const ordered = [admin, ...members].filter(Boolean);
-  const seenAdapters = new Set();
+  const seenMembers = new Set();
   const speakers = [];
   for (const member of ordered) {
-    const adapter = rootAdapterFor(member);
-    const key = adapter.id;
-    if (seenAdapters.has(key) && speakers.length >= 1) continue;
+    if (seenMembers.has(member.id)) continue;
     speakers.push(member);
-    seenAdapters.add(key);
+    seenMembers.add(member.id);
     if (speakers.length >= TEAM_ROUND_MAX_SPEAKERS) break;
   }
   return speakers;
@@ -3240,7 +3441,11 @@ function teamContextLines(context = {}) {
     `Team purpose/profile: ${team.purpose || team.sharedProfile}`,
     `Team members: ${memberNames}`,
     `Shared team documents/material: ${(team.sharedDocuments || []).join(", ") || "none listed"}`,
+    context.teamRound
+      ? `Stop rule: this team round stops if the user sends /stop or if ${context.teamRound.threshold} of ${context.teamRound.memberCount} member(s) request stop. Current stop requests: ${context.teamRound.stopRequests}.`
+      : "Stop rule: the team round stops if the user sends /stop or one-third of members request stop.",
     recent ? `Recent team conversation:\n${recent}` : "Recent team conversation: none yet.",
+    `If you believe this work/session should stop, include one separate single-line directive: ${TEAM_STOP_DIRECTIVE} {"reason":"short reason"}`,
     "Reply as your own agent identity, briefly, and you may address other team members by name.",
   ];
 }
@@ -3251,6 +3456,8 @@ function teamDirectiveLines() {
     `${TEAM_DIRECTIVE} {"name":"Short team name","purpose":"specific shared mission","members":["codex","claude"],"sharedProfile":"shared team context","sharedDocuments":["MEMORY.md","QUEUE.md"]}`,
     "Agent-to-team message protocol: to post a hidden side message into a team group chat, include one separate single-line directive:",
     `${TEAM_MESSAGE_DIRECTIVE} {"teamId":"core","text":"short message to the team"}`,
+    "Team stop protocol: to vote that the current team work/session should stop, include one separate single-line directive:",
+    `${TEAM_STOP_DIRECTIVE} {"reason":"short reason"}`,
     "The bridge hides directives from visible chat, persists teams, and includes them in future app snapshots.",
   ];
 }

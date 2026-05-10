@@ -7,7 +7,7 @@ Agent Control is ready to prepare for Google Play internal or closed testing. It
 ## Current App Facts
 
 - Package: `com.acrab.agentcontrol`
-- Current version: `0.3.47` / `versionCode 48`
+- Current version: `1.0.0` / `versionCode 50`
 - SDKs: `compileSdk 36`, `targetSdk 35`, `minSdk 26`
 - Permissions: `android.permission.INTERNET` only
 - Distribution model: phone-to-desktop companion app with Direct/VPN mode, self-hosted HTTPS relay mode, and optional managed relay mode
@@ -15,7 +15,7 @@ Agent Control is ready to prepare for Google Play internal or closed testing. It
 - Monetization/analytics: no ads and no analytics SDK
 - Pairing model: short-lived numeric key, HMAC proof, ECDH, HKDF, AES-GCM, and desktop fingerprint pinning
 - Persistence model: app-private Android storage for pairing state, desktop identity, runtime preferences, drafts, and recent conversation history; desktop-private bridge state on the user's computer
-- Tester support: in-app Setup tab with diagnostics, `/status`, attachment, reconnect checks, copyable tester report, and per-agent/team detail sheets
+- Tester support: first-run setup, pairing diagnostics, `/status`, attachment, reconnect checks, copyable tester report, and per-agent/team detail sheets
 
 ## Release Signing
 
@@ -49,7 +49,7 @@ Do not commit keystores, passwords, `keystore.properties`, or release artifacts.
   `https://github.com/Acrabxie/agent-control-apk/blob/main/docs/privacy-policy.md`
 - Use `docs/play-console-submission.md` for store listing, release notes, App access, Data safety, target audience, and content rating copy.
 - Use `docs/internal-testing-guide.md` for internal/closed tester instructions.
-- Ask testers to run the in-app Setup diagnostics before submitting feedback; the copied tester report redacts keys and session material.
+- Ask testers to run pairing diagnostics before submitting feedback; the copied tester report redacts keys and session material.
 - Complete Data safety with the draft below.
 - Complete App access / review instructions with the desktop bridge setup below.
 - Complete content rating questionnaire.

@@ -63,6 +63,20 @@ AGENT_CONTROL_CREATE_SUBAGENT {"name":"ReleaseGuard","role":"release checklist m
 
 The directive must be one standalone line in the agent reply. The bridge strips it from visible chat, creates or reuses the persistent child, broadcasts `agent.spawned` and `team.changed`, and includes the child in future `/v1/snapshot` responses. Messages sent to a subagent are routed through its root parent adapter with subagent context injected.
 
+Manual removal:
+
+```text
+/dismiss ReleaseGuard
+```
+
+Agent scoped removal protocol:
+
+```text
+AGENT_CONTROL_REMOVE_SUBAGENT {"id":"ReleaseGuard","reason":"no longer needed"}
+```
+
+The `id` field may contain the persisted id or display name. User-issued `/dismiss` can remove any persistent subagent; agent-issued directives are scoped to the actor's own child tree or root adapter.
+
 ## Team Group Chats
 
 The bridge stores dynamic teams at:
@@ -89,7 +103,13 @@ Agent-to-team side message protocol:
 AGENT_CONTROL_TEAM_MESSAGE {"teamId":"team-mobileops","text":"ReleaseGuard should watch the next build."}
 ```
 
-The bridge hides these directive lines from visible chat, persists teams, broadcasts `team.created` and `team.changed`, and returns teams in every `/v1/snapshot`. Messages sent to a team row are routed as group chat rounds: selected members reply one after another with team profile, shared material, and recent group history injected.
+Team stop vote protocol:
+
+```text
+AGENT_CONTROL_TEAM_STOP {"reason":"blocked on user confirmation"}
+```
+
+The bridge hides these directive lines from visible chat, persists teams, broadcasts `team.created` and `team.changed`, and returns teams in every `/v1/snapshot`. Messages sent to a team row are routed as group chat rounds: available members reply one after another with team profile, shared material, and recent group history injected. A running round stops when the user sends `/stop`, or when at least one-third of participating members emit `AGENT_CONTROL_TEAM_STOP`.
 
 ## Target Agent Routing
 

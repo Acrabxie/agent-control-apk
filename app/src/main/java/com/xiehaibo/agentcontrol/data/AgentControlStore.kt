@@ -1123,6 +1123,8 @@ class AgentControlStore(
         val speakers = team.memberIds.mapNotNull { memberId -> agents.firstOrNull { it.id == memberId } }.take(3)
         val slash = normalizeSlashCommand(text)
         val summary = when {
+            slash.command == "/stop" -> "Stop requested for ${team.name}. Pair the bridge for active team-round cancellation."
+            slash.command == "/resume" -> "${team.name} can continue. Send the next message to start a fresh team round."
             slash.command == "/team" || slash.command == "/team-create" -> "${team.name}: ${team.memberIds.size} members, shared profile: ${team.sharedProfile}"
             slash.command == "/" || slash.command == "/help" -> commandsForTarget(team.id).joinToString(" ") { it.trigger }
             attachments.isNotEmpty() -> "${team.name} received ${attachments.size} shared item(s)."
@@ -1189,10 +1191,11 @@ class AgentControlStore(
         rawTarget: String = "",
         actor: AgentNode = agents.firstOrNull { it.id == selectedTargetId } ?: selectedAgent(),
         recordSystemMessage: Boolean = true,
+        userRequested: Boolean = true,
     ): String {
         val target = resolveDismissTarget(rawTarget, actor)
             ?: return "No local subagent removed. Select a subagent or provide its name/id."
-        if (!canDismissSubagent(actor, target)) {
+        if (!userRequested && !canDismissSubagent(actor, target)) {
             return "${actor.name} cannot dismiss ${target.name}."
         }
         val removeIds = collectSubagentTree(target.id)
