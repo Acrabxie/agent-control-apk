@@ -354,12 +354,12 @@ class AgentControlStoreHistoryTest {
 
         val report = store.testerReport(
             packageName = "com.acrab.agentcontrol",
-            versionName = "1.0.0",
-            versionCode = 50,
+            versionName = "1.0.1",
+            versionCode = 51,
         )
 
         assertThat(report).contains("Package: com.acrab.agentcontrol")
-        assertThat(report).contains("Version: 1.0.0 (50)")
+        assertThat(report).contains("Version: 1.0.1 (51)")
         assertThat(report).doesNotContain("12345678")
         assertThat(report).doesNotContain("secret-value")
     }

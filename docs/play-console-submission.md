@@ -52,7 +52,7 @@ The app has no ads, no analytics SDK, and no account system.
 ## Internal Testing Release Notes
 
 ```text
-Agent Control 1.0.0 internal testing build.
+Agent Control 1.0.1 internal testing build.
 
 - Pair Android with the desktop bridge by QR code or 8-digit key
 - Control local agents including Codex, Claude Code, Gemini CLI, OpenCode, and compatible adapters
@@ -60,6 +60,7 @@ Agent Control 1.0.0 internal testing build.
 - Show running status such as thinking, reading, editing, testing, and replying
 - Support per-agent model/reasoning controls, Plan mode, file upload, and photo sending
 - Add persistent subagent removal, full team group rounds, and stop quorum handling
+- Remove the misleading estimated context-length ring from the composer and detail sheets
 - Keep pairing diagnostics, tester report copy, and agent/team detail pages
 - Keep first-install setup, privacy policy entry points, and Google Play release signing
 ```

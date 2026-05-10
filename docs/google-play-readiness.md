@@ -7,7 +7,7 @@ Agent Control is ready to prepare for Google Play internal or closed testing. It
 ## Current App Facts
 
 - Package: `com.acrab.agentcontrol`
-- Current version: `1.0.0` / `versionCode 50`
+- Current version: `1.0.1` / `versionCode 51`
 - SDKs: `compileSdk 36`, `targetSdk 35`, `minSdk 26`
 - Permissions: `android.permission.INTERNET` only
 - Distribution model: phone-to-desktop companion app with Direct/VPN mode, self-hosted HTTPS relay mode, and optional managed relay mode

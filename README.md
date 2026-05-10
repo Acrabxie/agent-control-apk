@@ -10,7 +10,7 @@ Android MVP for phone-based control of local coding agents: Codex, Claude Code, 
 - Per-agent runtime model menus: Codex, Claude Code, Gemini CLI, Antigravity/OpenClaw, OpenCode, and subagents expose the model IDs that belong to their own adapter instead of sharing Codex-only GPT choices.
 - Lightweight onboarding and tester diagnostics for pairing, `/status`, attachment, reconnect, and copyable tester reports without keeping a permanent setup screen in the main app.
 - Encrypted connection diagnostics for paired sessions, plus public lightweight bridge/relay health checks.
-- Agent and team detail sheets with identity, runtime controls, context meter, tools, recent action/error, and team shared material.
+- Agent and team detail sheets with identity, runtime controls, tools, recent action/error, and team shared material.
 - Bidirectional transfer model for photos and files.
 - Team roster with one administrator and explicit parent-child agent hierarchy.
 - Persistent subagents created by agents or `/spawn`, stored by the bridge and shown as first-class app conversations; users can remove any persistent subagent with `/dismiss Name`, and parent/self agents can remove scoped children through the directive protocol.

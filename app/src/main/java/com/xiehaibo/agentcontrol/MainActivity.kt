@@ -87,7 +87,6 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
@@ -1892,11 +1891,6 @@ private fun AgentDetailsDialog(
                     selectedId = permission,
                     onSelect = { store.updatePermissionForTarget(agent.id, it) },
                 )
-                ContextMeter(
-                    progress = (runtime.contextUsedTokens.toFloat() / runtime.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f),
-                    usedTokens = runtime.contextUsedTokens,
-                    limitTokens = runtime.contextLimitTokens,
-                )
                 DetailLine("Recent action", diagnostic?.lastAction?.ifBlank { null } ?: recentMessage?.toolCalls?.lastOrNull()?.toolName ?: "none")
                 DetailLine("Recent error", diagnostic?.lastError?.ifBlank { null } ?: store.lastSendFailure ?: "none")
                 DetailLine("Diagnostic state", diagnostic?.diagnosticState ?: store.connectionDiagnostics().summary)
@@ -2893,7 +2887,6 @@ private fun Composer(
     val targetPermission = store.permissionForTarget(store.selectedTargetId)
     val permissionLabel = runtimeLabel(runtime.permissionOptions, targetPermission, fallbackPermissionLabel(targetPermission))
     val planModeEnabled = targetPermission == "read-only"
-    val contextProgress = (runtime.contextUsedTokens.toFloat() / runtime.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f)
     val placeholderAlpha = rememberPulseAlpha(isSending)
     val modelOptions = runtime.modelOptions.ifEmpty {
         listOf(
@@ -3097,11 +3090,6 @@ private fun Composer(
                         },
                     )
                 }
-                ContextMeter(
-                    progress = contextProgress,
-                    usedTokens = runtime.contextUsedTokens,
-                    limitTokens = runtime.contextLimitTokens,
-                )
                 Spacer(modifier = Modifier.weight(1f))
                 IconButton(onClick = onVoiceInput, modifier = Modifier.size(44.dp)) {
                     Icon(
@@ -3148,31 +3136,6 @@ private fun RuntimeDropdown(
                 },
             )
         }
-    }
-}
-
-@Composable
-private fun ContextMeter(
-    progress: Float,
-    usedTokens: Int,
-    limitTokens: Int,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier.padding(horizontal = 4.dp),
-    ) {
-        CircularProgressIndicator(
-            progress = { progress },
-            modifier = Modifier.size(22.dp),
-            strokeWidth = 2.dp,
-        )
-        Text(
-            "${formatTokenCount(usedTokens)} / ${formatTokenCount(limitTokens)}",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-        )
     }
 }
 
