@@ -71,6 +71,36 @@ class NetworkBridgeClientInteropTest {
             assertThat(snapshot.messages.map { it.text }).contains("hello from android client")
             assertThat(snapshot.messages.map { it.text }).contains("Codex received: hello from android client")
 
+            val childName = "InteropChild${System.nanoTime()}"
+            NetworkBridgeClient.sendMessage(
+                desktopUrl = desktopUrl,
+                deviceId = result.response.deviceId.orEmpty(),
+                sessionKey = result.sessionKey,
+                payload = OutboundMessagePayload(text = "/spawn $childName | temporary test child", targetAgentId = "codex"),
+            )
+            val spawnedSnapshot = NetworkBridgeClient.fetchSnapshot(
+                desktopUrl = desktopUrl,
+                deviceId = result.response.deviceId.orEmpty(),
+                sessionKey = result.sessionKey,
+            )
+            val child = spawnedSnapshot.agents.first { it.name == childName }
+            assertThat(child.parentId).isEqualTo("codex")
+
+            val dismissReply = NetworkBridgeClient.sendMessage(
+                desktopUrl = desktopUrl,
+                deviceId = result.response.deviceId.orEmpty(),
+                sessionKey = result.sessionKey,
+                payload = OutboundMessagePayload(text = "/dismiss $childName", targetAgentId = "codex"),
+            )
+            assertThat(dismissReply.text).contains("Removed persistent subagent")
+            val dismissedSnapshot = NetworkBridgeClient.fetchSnapshot(
+                desktopUrl = desktopUrl,
+                deviceId = result.response.deviceId.orEmpty(),
+                sessionKey = result.sessionKey,
+            )
+            assertThat(dismissedSnapshot.agents.map { it.id }).doesNotContain(child.id)
+            assertThat(dismissedSnapshot.teams.flatMap { it.memberIds }).doesNotContain(child.id)
+
             val teamName = "InteropTeam${System.nanoTime()}"
             NetworkBridgeClient.sendMessage(
                 desktopUrl = desktopUrl,

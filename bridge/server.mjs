@@ -133,6 +133,7 @@ let claudeDirectDisabledUntil = 0;
 let codexRuntimeSettings = normalizeCodexRuntimeSettings(persistedBridgeState.codexRuntimeSettings || {});
 let privateStateSaveTimer = null;
 const SUBAGENT_DIRECTIVE = "AGENT_CONTROL_CREATE_SUBAGENT";
+const REMOVE_SUBAGENT_DIRECTIVE = "AGENT_CONTROL_REMOVE_SUBAGENT";
 const TEAM_DIRECTIVE = "AGENT_CONTROL_CREATE_TEAM";
 const TEAM_MESSAGE_DIRECTIVE = "AGENT_CONTROL_TEAM_MESSAGE";
 const FILE_DIRECTIVE = "AGENT_CONTROL_SEND_FILE";
@@ -143,6 +144,7 @@ const commands = [
   ["/status", "Status", "team"],
   ["/agents", "Agents", "team"],
   ["/spawn", "Spawn", "selected"],
+  ["/dismiss", "Dismiss subagent", "selected"],
   ["/team", "Team", "team"],
   ["/team-create", "New team", "team"],
   ["/start", "Start", "chat"],
@@ -2008,6 +2010,16 @@ function completedToolCallsFor(agent, text, pendingCalls = [], responseCalls = [
       `created ${created.map((item) => item.name).join(", ")}`,
     ));
   }
+  const removed = directiveResult.removedAgents || [];
+  if (removed.length) {
+    byKey.set(`agent.remove:${removed.map((item) => item.agent?.name).join(",")}`, toolCall(
+      agent.id,
+      "agent.remove",
+      "SUCCESS",
+      "agent directive",
+      `removed ${removed.map((item) => item.agent?.name).filter(Boolean).join(", ")}`,
+    ));
+  }
   if (!byKey.size) {
     byKey.set("agent.route", toolCall(
       agent.id,
@@ -2326,6 +2338,12 @@ async function responseFor(agent, text, extraContext = {}) {
       ? `Created persistent subagent: ${result.agent.name}. It will stay in the Android app after bridge restarts.`
       : `Persistent subagent already exists: ${result.agent.name}.`;
   }
+  if (command === "/dismiss") {
+    const result = await removePersistentSubagent(agent, parseRemoveSubagentCommand(slash.normalizedText, agent));
+    return result.removed
+      ? `Removed persistent subagent: ${result.agent.name}${result.removedIds.length > 1 ? ` and ${result.removedIds.length - 1} child subagent(s)` : ""}.`
+      : `No subagent removed: ${result.reason || "specify a subagent name or id."}`;
+  }
   if (command) {
     const agentCommand = agentSlashCommand(agent, command);
     if (!agentCommand) return `Unknown command ${command}. Try /help.`;
@@ -2420,6 +2438,16 @@ function canonicalSlashCommand(command = "") {
     "/logs": "/heartbeat",
     "/log": "/heartbeat",
     "/docs": "/api",
+    "/despawn": "/dismiss",
+    "/remove": "/dismiss",
+    "/delete": "/dismiss",
+    "/retire": "/dismiss",
+    "/remove-agent": "/dismiss",
+    "/remove-subagent": "/dismiss",
+    "/delete-agent": "/dismiss",
+    "/delete-subagent": "/dismiss",
+    "/dismiss-agent": "/dismiss",
+    "/dismiss-subagent": "/dismiss",
   };
   return aliases[normalized] || normalized;
 }
@@ -2431,6 +2459,7 @@ function commandHelpText(topic = "", agent = null) {
     "/agents": "List visible agents and subagents.",
     "/team": "List team chats and shared group context.",
     "/spawn": "Create a persistent subagent: /spawn Name | role.",
+    "/dismiss": "Remove a persistent subagent: /dismiss Name, or run /dismiss inside that subagent chat.",
     "/team-create": "Create a persistent team: /team-create Name | purpose.",
     "/model": "Show this agent's current model and model ids.",
     "/reasoning": "Show this agent's reasoning levels.",
@@ -2528,10 +2557,25 @@ function parseSpawnCommand(text, parent) {
   };
 }
 
+function parseRemoveSubagentCommand(text, actor) {
+  const raw = String(text || "")
+    .replace(/%s/gi, " ")
+    .replace(/^\/[^\s]+\s*/u, "")
+    .trim();
+  if (raw.startsWith("{")) {
+    const parsed = parseJsonSpec(raw);
+    if (parsed) return parsed;
+  }
+  if (!raw && actor?.kind === "SUBAGENT") return { id: actor.id };
+  return { name: raw };
+}
+
 async function applyAgentDirectives(actor, responseText, options = {}) {
-  const { text, subagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs } = parseAgentDirectives(responseText);
+  const { text, subagentSpecs, removeSubagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs } = parseAgentDirectives(responseText);
   const createdAgents = [];
   const existingAgents = [];
+  const removedAgents = [];
+  const removeFailures = [];
   const createdTeams = [];
   const existingTeams = [];
   const postedTeamMessages = [];
@@ -2541,6 +2585,11 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
     const result = await createPersistentSubagent(actor, spec);
     if (result.created) createdAgents.push(result.agent);
     else existingAgents.push(result.agent);
+  }
+  for (const spec of removeSubagentSpecs) {
+    const result = await removePersistentSubagent(actor, spec);
+    if (result.removed) removedAgents.push(result);
+    else removeFailures.push(result);
   }
   for (const spec of teamSpecs) {
     const result = await createPersistentTeam(actor, spec);
@@ -2559,6 +2608,8 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
   const notes = [
     ...createdAgents.map((child) => `Created persistent subagent: ${child.name}.`),
     ...existingAgents.map((child) => `Persistent subagent already exists: ${child.name}.`),
+    ...removedAgents.map((result) => `Removed persistent subagent: ${result.agent.name}${result.removedIds.length > 1 ? ` and ${result.removedIds.length - 1} child subagent(s)` : ""}.`),
+    ...removeFailures.map((result) => `No subagent removed: ${result.reason || "not found"}.`),
     ...createdTeams.map((team) => `Created persistent team: ${team.name}.`),
     ...existingTeams.map((team) => `Persistent team already exists: ${team.name}.`),
     ...postedTeamMessages.map((message) => `Posted to team: ${findTeam(message.targetAgentId)?.name || message.targetAgentId}.`),
@@ -2567,6 +2618,7 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
   return {
     text: [text.trim(), ...notes].filter(Boolean).join("\n\n") || "Done.",
     createdAgents,
+    removedAgents,
     createdTeams,
     postedTeamMessages,
     attachments,
@@ -2575,6 +2627,7 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
 
 function parseAgentDirectives(value) {
   const subagentSpecs = [];
+  const removeSubagentSpecs = [];
   const teamSpecs = [];
   const teamMessageSpecs = [];
   const fileSpecs = [];
@@ -2586,6 +2639,10 @@ function parseAgentDirectives(value) {
       const raw = trimmed.slice(SUBAGENT_DIRECTIVE.length).trim();
       const parsed = parseJsonSpec(raw) || { name: raw };
       subagentSpecs.push(parsed);
+    } else if (trimmed.startsWith(REMOVE_SUBAGENT_DIRECTIVE)) {
+      const raw = trimmed.slice(REMOVE_SUBAGENT_DIRECTIVE.length).trim();
+      const parsed = parseJsonSpec(raw) || { name: raw };
+      removeSubagentSpecs.push(parsed);
     } else if (trimmed.startsWith(TEAM_DIRECTIVE)) {
       const raw = trimmed.slice(TEAM_DIRECTIVE.length).trim();
       const parsed = parseJsonSpec(raw) || { name: raw };
@@ -2602,7 +2659,7 @@ function parseAgentDirectives(value) {
       visible.push(line);
     }
   }
-  return { text: visible.join("\n"), subagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs };
+  return { text: visible.join("\n"), subagentSpecs, removeSubagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs };
 }
 
 async function applySubagentDirectives(parent, responseText) {
@@ -2648,6 +2705,105 @@ async function createPersistentSubagent(parent, spec = {}) {
   broadcast("agent.spawned", child);
   broadcast("team.changed", snapshot());
   return { agent: child, created: true };
+}
+
+async function removePersistentSubagent(actor, spec = {}) {
+  const target = resolveSubagentRemovalTarget(actor, spec);
+  if (!target) {
+    return { removed: false, reason: "matching persistent subagent not found", removedIds: [] };
+  }
+  if (!canRemoveSubagent(actor, target)) {
+    return { removed: false, reason: `${actor.name} cannot remove ${target.name}`, agent: target, removedIds: [] };
+  }
+
+  const fallbackRoot = rootAdapterFor(actor);
+  const removedIds = collectSubagentSubtreeIds(target.id);
+  const removeSet = new Set(removedIds);
+  state.dynamicAgents = state.dynamicAgents.filter((agent) => !removeSet.has(agent.id));
+  await savePersistedAgents();
+  const teamsChanged = updateTeamsAfterAgentRemoval(removeSet, fallbackRoot);
+  if (teamsChanged) await savePersistedTeams();
+  heartbeat("team", `Removed persistent subagent ${target.name}${removedIds.length > 1 ? ` with ${removedIds.length - 1} child subagent(s)` : ""}`);
+  broadcast("agent.removed", {
+    id: target.id,
+    ids: removedIds,
+    name: target.name,
+    removedByAgentId: actor.id,
+  });
+  broadcast("team.changed", snapshot());
+  return { removed: true, agent: target, removedIds };
+}
+
+function resolveSubagentRemovalTarget(actor, spec = {}) {
+  const idValue = sanitizeText(spec.id || spec.agentId || spec.subagentId || spec.targetId, "", 80);
+  const nameValue = sanitizeText(spec.name || spec.agent || spec.subagent || spec.target || spec.label, "", 80);
+  if (!idValue && !nameValue && actor?.kind === "SUBAGENT") return actor;
+  const loweredName = nameValue.toLowerCase();
+  const slugName = slugify(nameValue);
+  const candidates = state.dynamicAgents.filter((agent) => {
+    if (idValue && agent.id === idValue) return true;
+    if (!nameValue) return false;
+    return agent.name.toLowerCase() === loweredName || slugify(agent.name) === slugName;
+  });
+  return candidates.find((agent) => canRemoveSubagent(actor, agent)) || candidates[0] || null;
+}
+
+function canRemoveSubagent(actor, target) {
+  if (!actor || !target || target.kind !== "SUBAGENT") return false;
+  if (actor.id === target.id) return true;
+  if (isSubagentDescendantOf(target, actor.id)) return true;
+  return rootAdapterFor(target).id === actor.id;
+}
+
+function isSubagentDescendantOf(target, ancestorId) {
+  let current = target;
+  const seen = new Set();
+  while (current?.kind === "SUBAGENT" && current.parentId && !seen.has(current.id)) {
+    if (current.parentId === ancestorId || current.id === ancestorId) return true;
+    seen.add(current.id);
+    current = findAgent(current.parentId);
+  }
+  return false;
+}
+
+function collectSubagentSubtreeIds(rootId) {
+  const removeSet = new Set([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const agent of state.dynamicAgents) {
+      if (!removeSet.has(agent.id) && removeSet.has(agent.parentId)) {
+        removeSet.add(agent.id);
+        changed = true;
+      }
+    }
+  }
+  return [...removeSet];
+}
+
+function updateTeamsAfterAgentRemoval(removeSet, fallbackRoot) {
+  let changed = false;
+  state.dynamicTeams = state.dynamicTeams.map((team) => {
+    const keptMembers = team.memberIds.filter((memberId) => !removeSet.has(memberId) && findAgent(memberId));
+    let adminAgentId = (!removeSet.has(team.adminAgentId) && findAgent(team.adminAgentId))
+      ? team.adminAgentId
+      : keptMembers[0] || fallbackRoot?.id || "codex";
+    if (!findAgent(adminAgentId)) adminAgentId = "codex";
+    const memberIds = [...new Set([adminAgentId, ...keptMembers])].filter((memberId) => findAgent(memberId));
+    const next = {
+      ...team,
+      adminAgentId,
+      memberIds: memberIds.length ? memberIds : ["codex"],
+      createdByAgentId: removeSet.has(team.createdByAgentId) ? adminAgentId : team.createdByAgentId,
+      updatedAt: Date.now(),
+    };
+    const teamChanged = next.adminAgentId !== team.adminAgentId ||
+      next.createdByAgentId !== team.createdByAgentId ||
+      next.memberIds.join("|") !== team.memberIds.join("|");
+    changed = changed || teamChanged;
+    return teamChanged ? next : team;
+  });
+  return changed;
 }
 
 async function createPersistentTeam(creator, spec = {}) {
@@ -3033,7 +3189,8 @@ function subagentDirectiveLines() {
   return [
     "Persistent subagent protocol: if a durable specialist should be created and shown in the Android app, include one separate single-line directive:",
     `${SUBAGENT_DIRECTIVE} {"name":"Short specialist name","role":"specific responsibility","tools":["direct-chat","report"],"modelOptions":[{"id":"model/id","label":"Model label"}],"permissionOptions":[{"id":"read-only","label":"Read Only"}],"slashCommands":[{"trigger":"/review","label":"Review"}]}`,
-    "The bridge hides that directive from chat, persists the subagent, and includes it in future app snapshots. Optional runtime options and slashCommands become the exact phone app choices for that agent. Create at most two unless the user asks for more.",
+    `Persistent subagent removal protocol: if your own durable subagent should be withdrawn from the Android app, include one separate single-line directive: ${REMOVE_SUBAGENT_DIRECTIVE} {"id":"subagent-id-or-name","reason":"short reason"}`,
+    "The bridge hides these directives from chat, persists roster changes, and includes them in future app snapshots. Optional runtime options and slashCommands become the exact phone app choices for that agent. Create at most two unless the user asks for more.",
   ];
 }
 

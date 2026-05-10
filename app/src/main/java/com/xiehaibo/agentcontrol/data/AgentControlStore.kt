@@ -200,6 +200,7 @@ class AgentControlStore(
         SlashCommand("/status", "Status", "team"),
         SlashCommand("/agents", "Agents", "team"),
         SlashCommand("/spawn", "Spawn", "selected"),
+        SlashCommand("/dismiss", "Dismiss subagent", "selected"),
         SlashCommand("/team", "Team", "team"),
         SlashCommand("/team-create", "New team", "team"),
         SlashCommand("/new", "New chat", "chat"),
@@ -1170,6 +1171,7 @@ class AgentControlStore(
                 addSystemMessage("Started a new local conversation for ${selectedTargetName()}.")
             }
             "/spawn" -> spawnSubagent()
+            "/dismiss" -> dismissLocalSubagent()
             "/memory" -> selectDocument("memory")
             "/heartbeat" -> selectDocument("heartbeat")
             "/api" -> selectDocument("api")
@@ -1232,13 +1234,18 @@ class AgentControlStore(
         } else {
             emptyList()
         }
+        val localCommandResponse = if (slashCommand.command == "/dismiss") {
+            dismissLocalSubagent(slashCommand.rest, agent, recordSystemMessage = false)
+        } else {
+            null
+        }
         messages.add(
             ChatMessage(
                 id = nextId(),
                 authorId = agent.id,
                 targetAgentId = "you",
                 kind = MessageKind.AGENT,
-                text = responseText(agent, text, attachments),
+                text = localCommandResponse ?: responseText(agent, text, attachments),
                 createdAt = now(),
                 conversationId = conversationId,
                 toolCalls = commandTool + transferTool + listOf(
@@ -1270,6 +1277,7 @@ class AgentControlStore(
             "/status" -> "Team online: ${agents.count { it.status == AgentStatus.ONLINE }} online, ${agents.count { it.kind == AgentKind.SUBAGENT }} subagents visible."
             "/agents" -> agents.joinToString("\n") { "${it.name}: ${it.status} / parent=${it.parentId ?: "none"}" }
             "/team", "/team-create" -> "${team.value.name}: admin=${agentName(team.value.adminAgentId)}, members=${team.value.memberIds.size}."
+            "/dismiss" -> "Remove a persistent subagent by name, or run /dismiss inside that subagent chat."
             "/parent" -> agent.parentId?.let { "${agent.name} is under ${agentName(it)}." } ?: "${agent.name} has no parent."
             "/tools" -> "${agent.name} tools: ${agent.tools.joinToString(", ")}"
             "/model" -> runtimeSummary(agent.id, "model")
@@ -1366,6 +1374,100 @@ class AgentControlStore(
         )
         pruneLocalMessages()
         persistConversation()
+    }
+
+    private fun dismissLocalSubagent(
+        rawTarget: String = "",
+        actor: AgentNode = agents.firstOrNull { it.id == selectedTargetId } ?: selectedAgent(),
+        recordSystemMessage: Boolean = true,
+    ): String {
+        val target = resolveDismissTarget(rawTarget, actor)
+            ?: return "No local subagent removed. Select a subagent or provide its name/id."
+        if (!canDismissSubagent(actor, target)) {
+            return "${actor.name} cannot dismiss ${target.name}."
+        }
+        val removeIds = collectSubagentTree(target.id)
+        agents.removeAll { it.id in removeIds }
+        for (index in teams.indices) {
+            val current = teams[index]
+            val keptMembers = current.memberIds.filter { memberId -> memberId !in removeIds && agents.any { it.id == memberId } }
+            val fallbackAdmin = keptMembers.firstOrNull()
+                ?: rootAgent(actor)?.id
+                ?: agents.firstOrNull()?.id
+                ?: current.adminAgentId
+            val adminId = if (current.adminAgentId in removeIds || agents.none { it.id == current.adminAgentId }) fallbackAdmin else current.adminAgentId
+            teams[index] = current.copy(
+                adminAgentId = adminId,
+                memberIds = (listOf(adminId) + keptMembers).distinct().filter { memberId -> agents.any { it.id == memberId } },
+                updatedAt = now(),
+            )
+        }
+        team.value = teams.firstOrNull { it.id == team.value.id } ?: team.value.copy(
+            memberIds = team.value.memberIds.filter { it !in removeIds },
+            updatedAt = now(),
+        )
+        normalizeSelections()
+        val message = "Subagent removed: ${target.name}${if (removeIds.size > 1) " and ${removeIds.size - 1} child subagent(s)" else ""}."
+        if (recordSystemMessage) {
+            messages.add(
+                ChatMessage(
+                    id = nextId(),
+                    authorId = "system",
+                    kind = MessageKind.SYSTEM,
+                    text = message,
+                    createdAt = now(),
+                )
+            )
+        }
+        pruneLocalMessages()
+        persistConversation()
+        return message
+    }
+
+    private fun resolveDismissTarget(rawTarget: String, actor: AgentNode): AgentNode? {
+        val targetText = rawTarget.trim()
+        if (targetText.isBlank() && actor.kind == AgentKind.SUBAGENT) return actor
+        val lowered = targetText.lowercase()
+        return agents
+            .filter { it.kind == AgentKind.SUBAGENT }
+            .firstOrNull { candidate ->
+                candidate.id == targetText ||
+                    candidate.name.lowercase() == lowered ||
+                    candidate.name.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-') == lowered.replace(Regex("[^a-z0-9]+"), "-").trim('-')
+            }
+    }
+
+    private fun canDismissSubagent(actor: AgentNode, target: AgentNode): Boolean {
+        if (target.kind != AgentKind.SUBAGENT) return false
+        if (actor.id == target.id) return true
+        if (isDescendantOf(target, actor.id)) return true
+        return rootAgent(target)?.id == actor.id
+    }
+
+    private fun isDescendantOf(target: AgentNode, ancestorId: String): Boolean {
+        var current: AgentNode? = target
+        val seen = mutableSetOf<String>()
+        while (current?.kind == AgentKind.SUBAGENT && current.parentId != null && seen.add(current.id)) {
+            val parentId = current.parentId
+            if (parentId == ancestorId || current.id == ancestorId) return true
+            current = agents.firstOrNull { it.id == parentId }
+        }
+        return false
+    }
+
+    private fun collectSubagentTree(rootId: String): Set<String> {
+        val removeIds = mutableSetOf(rootId)
+        var changed: Boolean
+        do {
+            changed = false
+            agents
+                .filter { it.kind == AgentKind.SUBAGENT && it.parentId in removeIds && it.id !in removeIds }
+                .forEach {
+                    removeIds.add(it.id)
+                    changed = true
+                }
+        } while (changed)
+        return removeIds
     }
 
     private fun restorePersistedConversation() {
@@ -1590,6 +1692,16 @@ class AgentControlStore(
             "/logs" to "/heartbeat",
             "/log" to "/heartbeat",
             "/docs" to "/api",
+            "/despawn" to "/dismiss",
+            "/remove" to "/dismiss",
+            "/delete" to "/dismiss",
+            "/retire" to "/dismiss",
+            "/remove-agent" to "/dismiss",
+            "/remove-subagent" to "/dismiss",
+            "/delete-agent" to "/dismiss",
+            "/delete-subagent" to "/dismiss",
+            "/dismiss-agent" to "/dismiss",
+            "/dismiss-subagent" to "/dismiss",
         )[normalized] ?: normalized
     }
 
@@ -1602,6 +1714,7 @@ class AgentControlStore(
             "/agents" to "List visible agents and subagents.",
             "/team" to "List team chats and shared group context.",
             "/spawn" to "Create a persistent subagent: /spawn Name | role.",
+            "/dismiss" to "Remove a persistent subagent: /dismiss Name, or run /dismiss inside that subagent chat.",
             "/team-create" to "Create a persistent team: /team-create Name | purpose.",
             "/model" to "Show this agent's current model and model ids.",
             "/reasoning" to "Show this agent's reasoning levels.",

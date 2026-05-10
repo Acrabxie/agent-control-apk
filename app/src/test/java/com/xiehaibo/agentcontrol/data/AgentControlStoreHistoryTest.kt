@@ -189,6 +189,24 @@ class AgentControlStoreHistoryTest {
     }
 
     @Test
+    fun localDismissCommandRemovesSelectedSubagentFromRosterAndTeams() {
+        val store = AgentControlStore()
+
+        store.selectedTargetId = "codex"
+        store.runCommand(SlashCommand("/spawn", "Spawn", "selected"))
+        val childId = store.selectedAgentId
+        assertThat(store.agents.map { it.id }).contains(childId)
+        assertThat(store.team.value.memberIds).contains(childId)
+
+        store.selectedTargetId = childId
+        store.runCommand(SlashCommand("/dismiss", "Dismiss subagent", "selected"))
+
+        assertThat(store.agents.map { it.id }).doesNotContain(childId)
+        assertThat(store.teams.flatMap { it.memberIds }).doesNotContain(childId)
+        assertThat(store.selectedTargetId).isNotEqualTo(childId)
+    }
+
+    @Test
     fun runningRepliesShowTypingAndCompletionBecomesUnread() {
         val store = AgentControlStore()
         val pending = ChatMessage(
