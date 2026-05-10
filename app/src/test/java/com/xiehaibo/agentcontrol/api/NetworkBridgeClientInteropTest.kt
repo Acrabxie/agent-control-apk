@@ -21,6 +21,7 @@ class NetworkBridgeClientInteropTest {
                 environment()["AGENT_CONTROL_RELAY_URL"] = ""
                 environment()["AGENT_CONTROL_DISABLE_REAL_AGENTS"] = "1"
                 environment()["AGENT_CONTROL_ROOT"] = tempRoot.absolutePath
+                environment()["AGENT_CONTROL_PRIVATE_STATE_DIR"] = File(tempRoot, "private").absolutePath
             }
             .start()
 
@@ -38,6 +39,19 @@ class NetworkBridgeClientInteropTest {
 
             assertThat(result.response.accepted).isTrue()
             assertThat(result.response.deviceId).isNotEmpty()
+
+            val health = NetworkBridgeClient.fetchHealth(desktopUrl)
+            assertThat(health.ok).isTrue()
+            assertThat(health.version).isEqualTo("agent-control.v1")
+
+            val diagnostics = NetworkBridgeClient.fetchDiagnostics(
+                desktopUrl = desktopUrl,
+                deviceId = result.response.deviceId.orEmpty(),
+                sessionKey = result.sessionKey,
+            )
+            assertThat(diagnostics.sessionActive).isTrue()
+            assertThat(diagnostics.pairedDeviceId).isEqualTo(result.response.deviceId.orEmpty())
+            assertThat(diagnostics.agents.map { it.id }).contains("codex")
 
             val reply = NetworkBridgeClient.sendMessage(
                 desktopUrl = desktopUrl,

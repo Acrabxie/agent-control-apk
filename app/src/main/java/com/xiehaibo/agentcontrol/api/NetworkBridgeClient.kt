@@ -112,6 +112,14 @@ object NetworkBridgeClient {
         return responseEnvelope.payload
     }
 
+    fun fetchHealth(desktopUrl: String): BridgeHealth {
+        val responseText = requestJson(
+            method = "GET",
+            url = desktopUrl.endpoint("/v1/health"),
+        )
+        return json.decodeFromString(BridgeHealth.serializer(), responseText)
+    }
+
     fun fetchSnapshot(
         desktopUrl: String,
         deviceId: String,
@@ -126,6 +134,25 @@ object NetworkBridgeClient {
         val decrypted = SecurePairing.decrypt(responsePayload, sessionKey).toString(Charsets.UTF_8)
         val responseEnvelope = json.decodeFromString(
             BridgeEnvelope.serializer(BridgeSnapshot.serializer()),
+            decrypted,
+        )
+        return responseEnvelope.payload
+    }
+
+    fun fetchDiagnostics(
+        desktopUrl: String,
+        deviceId: String,
+        sessionKey: SecretKey,
+    ): BridgeDiagnostics {
+        val responseText = requestJson(
+            method = "GET",
+            url = desktopUrl.endpoint("/v1/diagnostics"),
+            headers = mapOf("X-Device-Id" to deviceId),
+        )
+        val responsePayload = json.decodeFromString(EncryptedPayload.serializer(), responseText)
+        val decrypted = SecurePairing.decrypt(responsePayload, sessionKey).toString(Charsets.UTF_8)
+        val responseEnvelope = json.decodeFromString(
+            BridgeEnvelope.serializer(BridgeDiagnostics.serializer()),
             decrypted,
         )
         return responseEnvelope.payload

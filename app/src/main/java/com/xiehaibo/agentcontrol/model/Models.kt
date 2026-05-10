@@ -51,7 +51,17 @@ data class AgentNode(
     val parentId: String? = null,
     val teamId: String = "core",
     val tools: List<String> = emptyList(),
+    val modelOptions: List<AgentCapabilityOption> = emptyList(),
+    val reasoningOptions: List<AgentCapabilityOption> = emptyList(),
+    val permissionOptions: List<AgentCapabilityOption> = emptyList(),
+    val slashCommands: List<SlashCommand> = emptyList(),
     val canSpawnChildren: Boolean = false,
+)
+
+@Serializable
+data class AgentCapabilityOption(
+    val id: String,
+    val label: String = id,
 )
 
 @Serializable
@@ -77,6 +87,7 @@ data class FileTransfer(
     val direction: TransferDirection,
     val uri: String,
     val sizeLabel: String = "queued",
+    val contentBase64: String = "",
 )
 
 @Serializable

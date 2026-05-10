@@ -1,6 +1,6 @@
 # Agent Control Relay
 
-Cloudflare Worker relay for out-of-home Agent Control sessions.
+Cloudflare Worker relay for out-of-home Agent Control sessions. This folder is intended for self-hosting: a user or their local coding agent can deploy it to the user's own Cloudflare account and paste the resulting HTTPS URL into Agent Control.
 
 The user-facing pairing flow stays simple:
 
@@ -9,6 +9,10 @@ The user-facing pairing flow stays simple:
 3. The relay forwards pairing, encrypted message, snapshot, file, and project-document envelopes between the phone and desktop.
 
 The relay does not run agents and does not decrypt post-pairing payloads. The desktop bridge still owns ECDH pairing, AES-GCM session keys, agent routing, and file handling.
+
+The relay keeps hot-path state in Durable Object memory and uses desktop long polling. Empty desktop polls wait briefly for work instead of returning immediately, which keeps idle request volume low enough for development and small private use.
+
+For full setup instructions written for humans and coding agents, read [`../docs/self-hosted-relay.md`](../docs/self-hosted-relay.md).
 
 ## Run Locally
 
@@ -30,16 +34,16 @@ npx wrangler whoami
 npm run deploy
 ```
 
-After deploy, set the desktop LaunchAgent or shell environment:
+After deploy, set the desktop LaunchAgent or shell environment to the URL printed by Wrangler:
 
 ```bash
 AGENT_CONTROL_RELAY_URL=https://agent-control-relay.<account>.workers.dev
 ```
 
-Android users enter that HTTPS relay URL plus the current 8-digit desktop key. LAN URLs are only a fallback for local networks that allow direct phone-to-desktop HTTP.
+In the Android Pair dialog, use the same URL as the computer or relay address, then enter the current 8-digit key from `http://127.0.0.1:7149`.
 
-For store builds, pass the deployed HTTPS URL into the Android build so the pair dialog defaults to the built-in secure relay:
+If the user is building their own APK and wants the app to default to this self-hosted relay, pass the deployed HTTPS URL into the Android build:
 
 ```bash
-./gradlew assembleRelease -PagentControlDefaultRelayUrl=https://agent-control-relay.example.com
+./gradlew assembleRelease -PagentControlDefaultRelayUrl=https://agent-control-relay.<account>.workers.dev
 ```

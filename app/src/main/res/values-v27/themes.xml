@@ -3,6 +3,7 @@
         <item name="android:statusBarColor">@color/agent_warm_canvas</item>
         <item name="android:navigationBarColor">@color/agent_warm_canvas</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
         <item name="android:colorAccent">@color/agent_logo_orange</item>
         <item name="android:windowActionBar">false</item>
         <item name="android:windowNoTitle">true</item>

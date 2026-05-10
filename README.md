@@ -7,13 +7,18 @@ Android MVP for phone-based control of local coding agents: Codex, Claude Code, 
 - Conversational control surface for direct agent and subagent chat.
 - Natural light-gray execution/status stream alongside text output, including Codex JSONL stage messages and Claude/Gemini/Antigravity/OpenCode stdout, stderr, and JSON event hooks for running, editing, creating, build/test, model fallback, and context-compaction events.
 - Slash commands remain available by typing `/status`, `/agents`, `/spawn`, `/team`, `/parent`, `/memory`, `/heartbeat`, `/files`, `/photo`, `/tools`, `/handoff`, `/approve`, `/pause`, `/resume`, `/stop`, `/clear`, `/api`, or `/help` in the composer.
+- Per-agent runtime model menus: Codex, Claude Code, Gemini CLI, Antigravity/OpenClaw, OpenCode, and subagents expose the model IDs that belong to their own adapter instead of sharing Codex-only GPT choices.
+- Setup tab for testers with pairing, diagnostics, `/status`, attachment, reconnect, and copyable tester report checks.
+- Encrypted connection diagnostics for paired sessions, plus public lightweight bridge/relay health checks.
+- Agent and team detail sheets with identity, runtime controls, context meter, tools, recent action/error, and team shared material.
 - Bidirectional transfer model for photos and files.
 - Team roster with one administrator and explicit parent-child agent hierarchy.
 - Persistent subagents created by agents or `/spawn`, stored by the bridge and shown as first-class app conversations.
 - Persistent teams created by agents or `/team-create`, shown as group-chat rows with shared team material and agent-to-agent messages.
 - Project panel for editing memory, queue, heartbeat, and bridge API documents.
 - Short-lived 8-digit desktop key pairing with HMAC-SHA256 proof, ECDH P-256, HKDF-SHA256, and AES-256-GCM.
-- Cloudflare Worker relay for out-of-home control while keeping the same numeric-key pairing UX; LAN direct mode remains a local fallback.
+- Three connection modes with the same numeric-key pairing UX: Direct/VPN, self-hosted HTTPS relay, and optional managed relay.
+- First-install two-page onboarding: install the desktop bridge/relay from this repo with a coding agent, then pair the phone or skip for later.
 - WhatsApp/Telegram-inspired chat screen with bottom rounded composer and no always-visible command list.
 
 ## Bridge API
@@ -22,6 +27,8 @@ The desktop companion daemon should expose a compact encrypted API:
 
 - `GET /v1/pairing-challenge`
 - `POST /v1/pair`
+- `GET /v1/health`
+- `GET /v1/diagnostics`
 - `GET /v1/stream`
 - `POST /v1/messages`
 - `POST /v1/files`
@@ -36,9 +43,45 @@ The included Node bridge lives in `bridge/server.mjs`. On this Mac it is install
 http://127.0.0.1:7149
 ```
 
-For production and Google Play use, deploy `relay/` and enter the HTTPS relay URL shown on the desktop page. LAN addresses such as `http://192.168.1.42:7149` are only a local fallback because routers, guest Wi-Fi, VPNs, and AP isolation can block phone-to-desktop HTTP even when both devices are on the same subnet. The 8-digit key expires after 5 minutes and is invalidated after successful pairing or too many failed attempts.
+The 8-digit key expires after 5 minutes and is invalidated after successful pairing or too many failed attempts.
 
-Google Play builds can embed the official relay URL so users only see the secure relay option plus the numeric key:
+## Connection Modes
+
+Agent Control supports three modes. The phone UI always pairs with the desktop by QR code or by address plus 8-digit key.
+
+### 1. Direct / VPN
+
+Use a direct desktop URL when the phone can reach the computer:
+
+```text
+http://192.168.1.42:7149
+http://100.x.y.z:7149
+```
+
+This is free and works well with LAN, Tailscale, ZeroTier, or another user-managed VPN. It is not reliable as a default Google Play path because routers, guest Wi-Fi, carrier networks, VPNs, and AP isolation can block phone-to-desktop HTTP.
+
+### 2. Self-Hosted Relay
+
+Recommended for technical users who already run Codex, Claude Code, Gemini CLI, or similar local agents. The user deploys `relay/` to their own Cloudflare account, then uses that HTTPS URL in both places:
+
+```bash
+# Desktop bridge
+AGENT_CONTROL_RELAY_URL=https://agent-control-relay.<account>.workers.dev \
+AGENT_CONTROL_PORT=7149 \
+node bridge/server.mjs
+```
+
+```text
+# Android app Pair dialog
+Computer or relay address = https://agent-control-relay.<account>.workers.dev
+8-digit key = the current key shown at http://127.0.0.1:7149
+```
+
+Full agent-readable setup instructions live in [`docs/self-hosted-relay.md`](docs/self-hosted-relay.md).
+
+### 3. Managed Relay
+
+Optional future/default path where the app developer operates the relay and embeds the URL in the APK. Users only scan the QR code or enter the 8-digit key. For a managed build:
 
 ```bash
 ./gradlew assembleRelease -PagentControlDefaultRelayUrl=https://agent-control-relay.example.com
@@ -80,7 +123,7 @@ AGENT_CONTROL_TEAM_MESSAGE {"teamId":"team-mobileops","text":"ReleaseGuard shoul
 
 When a user sends a normal message to a team row, the bridge lets selected members answer in order, so later members see the earlier group replies.
 
-Google Play readiness notes live in `docs/google-play-readiness.md`.
+Google Play readiness notes live in [`docs/google-play-readiness.md`](docs/google-play-readiness.md). Play Console copy lives in [`docs/play-console-submission.md`](docs/play-console-submission.md), tester instructions live in [`docs/internal-testing-guide.md`](docs/internal-testing-guide.md), and the publishable privacy policy draft lives in [`docs/privacy-policy.md`](docs/privacy-policy.md).
 
 ## Build
 
@@ -89,3 +132,18 @@ Google Play readiness notes live in `docs/google-play-readiness.md`.
 ```
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Release Bundle
+
+Configure an upload key with environment variables or Gradle properties, then build an Android App Bundle for Play Console:
+
+```bash
+export AGENT_CONTROL_UPLOAD_STORE_FILE="$HOME/secure/agent-control-upload.p12"
+export AGENT_CONTROL_UPLOAD_STORE_PASSWORD="..."
+export AGENT_CONTROL_UPLOAD_KEY_ALIAS="agent-control-upload"
+export AGENT_CONTROL_UPLOAD_KEY_PASSWORD="..."
+
+./gradlew bundleRelease
+```
+
+The release AAB is written to `app/build/outputs/bundle/release/app-release.aab`. Do not commit keystores, passwords, or release artifacts.

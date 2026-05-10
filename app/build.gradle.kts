@@ -7,17 +7,36 @@ plugins {
 fun String.asBuildConfigString(): String =
     "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
 
+val releaseStoreFilePath = providers.gradleProperty("agentControlUploadStoreFile")
+    .orElse(providers.environmentVariable("AGENT_CONTROL_UPLOAD_STORE_FILE"))
+    .orNull
+val releaseStorePassword = providers.gradleProperty("agentControlUploadStorePassword")
+    .orElse(providers.environmentVariable("AGENT_CONTROL_UPLOAD_STORE_PASSWORD"))
+    .orNull
+val releaseKeyAlias = providers.gradleProperty("agentControlUploadKeyAlias")
+    .orElse(providers.environmentVariable("AGENT_CONTROL_UPLOAD_KEY_ALIAS"))
+    .orNull
+val releaseKeyPassword = providers.gradleProperty("agentControlUploadKeyPassword")
+    .orElse(providers.environmentVariable("AGENT_CONTROL_UPLOAD_KEY_PASSWORD"))
+    .orNull
+val hasReleaseSigningConfig = listOf(
+    releaseStoreFilePath,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.xiehaibo.agentcontrol"
     buildToolsVersion = "36.0.0"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.xiehaibo.agentcontrol"
+        applicationId = "com.acrab.agentcontrol"
         minSdk = 26
         targetSdk = 35
-        versionCode = 39
-        versionName = "0.3.38"
+        versionCode = 49
+        versionName = "0.3.48"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -32,8 +51,22 @@ android {
         )
     }
 
+    if (hasReleaseSigningConfig) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(releaseStoreFilePath!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigningConfig) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

@@ -1,14 +1,22 @@
 package com.xiehaibo.agentcontrol
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.speech.RecognizerIntent
 import android.util.Log
+import android.util.Base64
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -19,8 +27,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +53,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -53,9 +64,12 @@ import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Groups
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
@@ -74,7 +88,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DividerDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
@@ -85,6 +98,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -92,7 +106,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -106,9 +121,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
@@ -133,6 +151,8 @@ import com.xiehaibo.agentcontrol.model.MessageKind
 import com.xiehaibo.agentcontrol.model.ProjectDocument
 import com.xiehaibo.agentcontrol.model.ToolCall
 import com.xiehaibo.agentcontrol.model.ToolStatus
+import java.io.File
+import java.io.FileInputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -167,11 +187,31 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppPanel {
     CHAT,
+    SETUP,
     PROJECT,
 }
 
 private const val BRIDGE_TAG = "AgentControlBridge"
 private const val MESSAGE_SEND_TIMEOUT_MS = 315_000L
+private const val ONBOARDING_PREFS = "agent_control_onboarding"
+private const val ONBOARDING_COMPLETE_KEY = "onboarding_complete"
+private const val ONBOARDING_REVISION_KEY = "onboarding_revision"
+private const val ONBOARDING_REVISION = 1
+private const val AGENT_CONTROL_REPO_URL = "https://github.com/Acrabxie/agent-control-apk"
+private const val AGENT_CONTROL_PRIVACY_URL = "https://github.com/Acrabxie/agent-control-apk/blob/main/docs/privacy-policy.md"
+private val LogoCanvas = Color(0xFFFFFAF1)
+private val LogoSurface = Color(0xFFFFFCF7)
+private val LogoSurfaceWarm = Color(0xFFFFF4E4)
+private val LogoOrange = Color(0xFFF1B47E)
+private val LogoYellow = Color(0xFFF5DE87)
+private val WarmPrimary = Color(0xFFC86F2D)
+private val WarmPrimaryDark = Color(0xFF7A3F18)
+private val WarmInk = Color(0xFF2F251B)
+private val WarmMuted = Color(0xFF756957)
+private val WarmOutline = Color(0xFFE4C89F)
+private val WarmOutlineSoft = Color(0xFFF0DDBC)
+private val WarmUserBubble = Color(0xFFF0EEE8)
+private val WarmError = Color(0xFFB45A4E)
 
 private data class PairingDeepLink(
     val desktopUrl: String,
@@ -207,14 +247,36 @@ private fun parsePairingDeepLinkUri(uri: Uri?): PairingDeepLink? {
 
 @Composable
 private fun AgentControlTheme(content: @Composable () -> Unit) {
-    val colors = darkColorScheme(
-        primary = Color(0xFF7DD3FC),
-        secondary = Color(0xFFB5E48C),
-        tertiary = Color(0xFFFFC857),
-        background = Color(0xFF101418),
-        surface = Color(0xFF171D23),
-        surfaceVariant = Color(0xFF232B33),
-        outline = Color(0xFF536171),
+    val colors = lightColorScheme(
+        primary = WarmPrimary,
+        onPrimary = Color.White,
+        primaryContainer = Color(0xFFFFDFC1),
+        onPrimaryContainer = WarmPrimaryDark,
+        inversePrimary = LogoOrange,
+        secondary = Color(0xFF9A6B10),
+        onSecondary = Color.White,
+        secondaryContainer = LogoYellow,
+        onSecondaryContainer = Color(0xFF473300),
+        tertiary = Color(0xFFA45F25),
+        onTertiary = Color.White,
+        tertiaryContainer = LogoOrange,
+        onTertiaryContainer = Color(0xFF452100),
+        background = LogoCanvas,
+        onBackground = WarmInk,
+        surface = LogoSurface,
+        onSurface = WarmInk,
+        surfaceVariant = LogoSurfaceWarm,
+        onSurfaceVariant = WarmMuted,
+        surfaceTint = WarmPrimary,
+        inverseSurface = WarmInk,
+        inverseOnSurface = LogoCanvas,
+        outline = WarmOutline,
+        outlineVariant = WarmOutlineSoft,
+        error = WarmError,
+        onError = Color.White,
+        errorContainer = Color(0xFFFFDAD3),
+        onErrorContainer = Color(0xFF5E160F),
+        scrim = Color(0x66000000),
     )
     MaterialTheme(colorScheme = colors, content = content)
 }
@@ -243,8 +305,24 @@ private fun AgentControlApp(
     var pairingBusy by rememberSaveable { mutableStateOf(false) }
     var scanBusy by rememberSaveable { mutableStateOf(false) }
     var pairingError by rememberSaveable { mutableStateOf<String?>(null) }
+    val onboardingPrefs = remember(appContext) {
+        appContext.getSharedPreferences(ONBOARDING_PREFS, Context.MODE_PRIVATE)
+    }
+    var showOnboarding by rememberSaveable {
+        mutableStateOf(onboardingPrefs.getInt(ONBOARDING_REVISION_KEY, 0) < ONBOARDING_REVISION)
+    }
+    var onboardingPage by rememberSaveable { mutableStateOf(0) }
+
+    fun completeOnboarding() {
+        onboardingPrefs.edit()
+            .putBoolean(ONBOARDING_COMPLETE_KEY, true)
+            .putInt(ONBOARDING_REVISION_KEY, ONBOARDING_REVISION)
+            .apply()
+        showOnboarding = false
+    }
 
     fun applyPairingLink(link: PairingDeepLink, source: String) {
+        completeOnboarding()
         store.desktopUrlDraft = link.desktopUrl
         store.pairingKeyDraft = link.pairingKey.chunked(4).joinToString(" ")
         pairingError = null
@@ -279,6 +357,130 @@ private fun AgentControlApp(
             }
     }
 
+    fun currentBridgeUrl(): String =
+        store.pairingInfo.desktopUrl.ifBlank { store.desktopUrlDraft }.trim().trimEnd('/')
+
+    fun runDiagnostics() {
+        val desktopUrl = currentBridgeUrl()
+        if (desktopUrl.isBlank()) {
+            store.recordDiagnosticsFailure("Enter a desktop or relay address before running diagnostics.")
+            panel = AppPanel.SETUP
+            return
+        }
+        store.beginDiagnostics()
+        panel = AppPanel.SETUP
+        scope.launch {
+            var health = store.latestBridgeHealth
+            try {
+                health = withTimeout(45_000) {
+                    withContext(Dispatchers.IO) {
+                        NetworkBridgeClient.fetchHealth(desktopUrl)
+                    }
+                }
+                store.recordDiagnosticsHealth(health)
+                var diagnostics: com.xiehaibo.agentcontrol.api.BridgeDiagnostics? = null
+                val key = store.sessionKey
+                if (store.pairingInfo.paired && key != null && store.deviceId.isNotBlank()) {
+                    diagnostics = withTimeout(45_000) {
+                        withContext(Dispatchers.IO) {
+                            NetworkBridgeClient.fetchDiagnostics(
+                                desktopUrl = desktopUrl,
+                                deviceId = store.deviceId,
+                                sessionKey = key,
+                            )
+                        }
+                    }
+                    val snapshot = withTimeout(45_000) {
+                        withContext(Dispatchers.IO) {
+                            NetworkBridgeClient.fetchSnapshot(
+                                desktopUrl = desktopUrl,
+                                deviceId = store.deviceId,
+                                sessionKey = key,
+                            )
+                        }
+                    }
+                    store.applySnapshot(snapshot)
+                }
+                store.recordDiagnosticsSuccess(health, diagnostics)
+            } catch (error: Throwable) {
+                val message = error.message ?: "Diagnostics failed"
+                if (message.contains("not_paired") || message.contains("HTTP 401")) {
+                    store.recordDiagnosticsFailure("Diagnostics needs a paired encrypted session.")
+                } else {
+                    store.recordDiagnosticsFailure(message)
+                }
+            }
+        }
+    }
+
+    fun sendStatusCommand() {
+        val targetId = store.selectedTargetId.takeIf { target ->
+            store.agents.any { it.id == target } || store.teams.any { it.id == target }
+        } ?: "codex"
+        store.prepareStatusDraft(targetId)
+        panel = AppPanel.CHAT
+        scope.launch {
+            val message = store.consumeDraft() ?: return@launch
+            val key = store.sessionKey
+            try {
+                if (store.pairingInfo.paired && key != null && store.deviceId.isNotBlank()) {
+                    val desktopUrl = currentBridgeUrl()
+                    val reply = withTimeout(MESSAGE_SEND_TIMEOUT_MS) {
+                        withContext(Dispatchers.IO) {
+                            NetworkBridgeClient.sendMessage(
+                                desktopUrl = desktopUrl,
+                                deviceId = store.deviceId,
+                                sessionKey = key,
+                                payload = store.outboundPayload(message),
+                            )
+                        }
+                    }
+                    store.addRemoteReply(reply)
+                    store.clearSendFailure()
+                    runCatching {
+                        val snapshot = withTimeout(45_000) {
+                            withContext(Dispatchers.IO) {
+                                NetworkBridgeClient.fetchSnapshot(
+                                    desktopUrl = desktopUrl,
+                                    deviceId = store.deviceId,
+                                    sessionKey = key,
+                                )
+                            }
+                        }
+                        store.applySnapshot(snapshot)
+                    }
+                } else {
+                    store.respondLocallyTo(message)
+                }
+            } catch (error: Throwable) {
+                val messageText = error.message ?: "Send /status failed"
+                store.rememberSendFailure(messageText)
+                if (messageText.contains("not_paired") || messageText.contains("HTTP 401")) {
+                    store.markPairingInvalid("Bridge session expired. Pair with the computer again, then resend /status.")
+                } else {
+                    store.addSystemMessage("Could not send /status: $messageText")
+                }
+            }
+        }
+    }
+
+    fun copyTesterReport() {
+        val report = store.testerReport(
+            packageName = BuildConfig.APPLICATION_ID,
+            versionName = BuildConfig.VERSION_NAME,
+            versionCode = BuildConfig.VERSION_CODE,
+        )
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        clipboard?.setPrimaryClip(ClipData.newPlainText("Agent Control tester report", report))
+        store.addSystemMessage("Tester report copied.")
+    }
+
+    fun copyOnboardingText(label: String, text: String) {
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        clipboard?.setPrimaryClip(ClipData.newPlainText(label, text))
+        store.addSystemMessage("$label copied.")
+    }
+
     LaunchedEffect(incomingPairingLink) {
         val link = incomingPairingLink ?: return@LaunchedEffect
         applyPairingLink(link, "Loaded")
@@ -288,6 +490,11 @@ private fun AgentControlApp(
     Scaffold(
         topBar = {
             TopAppBar(
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface,
+                    actionIconContentColor = MaterialTheme.colorScheme.primary,
+                ),
                 title = {
                     Column {
                         Text("Agent Control", fontWeight = FontWeight.SemiBold)
@@ -306,6 +513,7 @@ private fun AgentControlApp(
                         label = { Text(if (store.pairingInfo.paired) "encrypted" else "pair") },
                         leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp)) },
                         colors = AssistChipDefaults.assistChipColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
                             labelColor = MaterialTheme.colorScheme.onSurface,
                             leadingIconContentColor = MaterialTheme.colorScheme.primary,
                         ),
@@ -315,18 +523,30 @@ private fun AgentControlApp(
             )
         },
         bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+            NavigationBar(
+                containerColor = MaterialTheme.colorScheme.surface,
+                tonalElevation = 0.dp,
+            ) {
                 NavigationBarItem(
                     selected = panel == AppPanel.CHAT,
                     onClick = { panel = AppPanel.CHAT },
                     icon = { Icon(Icons.Default.Terminal, contentDescription = null) },
                     label = { Text("Chat") },
+                    colors = warmNavigationItemColors(),
+                )
+                NavigationBarItem(
+                    selected = panel == AppPanel.SETUP,
+                    onClick = { panel = AppPanel.SETUP },
+                    icon = { Icon(Icons.Default.Build, contentDescription = null) },
+                    label = { Text("Setup") },
+                    colors = warmNavigationItemColors(),
                 )
                 NavigationBarItem(
                     selected = panel == AppPanel.PROJECT,
                     onClick = { panel = AppPanel.PROJECT },
                     icon = { Icon(Icons.Default.Folder, contentDescription = null) },
                     label = { Text("Project") },
+                    colors = warmNavigationItemColors(),
                 )
             }
         },
@@ -341,6 +561,13 @@ private fun AgentControlApp(
                 AppPanel.CHAT -> ChatPanel(
                     store = store,
                 )
+                AppPanel.SETUP -> SetupPanel(
+                    store = store,
+                    onStartPairing = { showPairDialog = true },
+                    onRunDiagnostics = { runDiagnostics() },
+                    onSendStatus = { sendStatusCommand() },
+                    onCopyTesterReport = { copyTesterReport() },
+                )
                 AppPanel.PROJECT -> ProjectPanel(
                     store = store,
                     openChat = { panel = AppPanel.CHAT },
@@ -349,7 +576,33 @@ private fun AgentControlApp(
         }
     }
 
-    if (showPairDialog) {
+    if (showOnboarding) {
+        SetupOnboarding(
+            page = onboardingPage,
+            onOpenRepository = {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(AGENT_CONTROL_REPO_URL)))
+                }.onFailure {
+                    store.addSystemMessage("Open $AGENT_CONTROL_REPO_URL on your computer.")
+                }
+            },
+            onCopyText = { label, text -> copyOnboardingText(label, text) },
+            onOpenPrivacyPolicy = {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(AGENT_CONTROL_PRIVACY_URL)))
+                }.onFailure {
+                    store.addSystemMessage("Privacy policy: $AGENT_CONTROL_PRIVACY_URL")
+                }
+            },
+            onContinue = { onboardingPage = 1 },
+            onBack = { onboardingPage = 0 },
+            onPair = {
+                completeOnboarding()
+                showPairDialog = true
+            },
+            onSkip = { completeOnboarding() },
+        )
+    } else if (showPairDialog) {
         PairingDialog(
             store = store,
             busy = pairingBusy,
@@ -357,6 +610,13 @@ private fun AgentControlApp(
             error = pairingError,
             builtInRelayUrl = builtInRelayUrl,
             onScanQr = { startPairingQrScan() },
+            onOpenPrivacyPolicy = {
+                runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(AGENT_CONTROL_PRIVACY_URL)))
+                }.onFailure {
+                    store.addSystemMessage("Privacy policy: $AGENT_CONTROL_PRIVACY_URL")
+                }
+            },
             onDismiss = { showPairDialog = false },
             onForget = {
                 store.forgetDesktopPairing()
@@ -406,6 +666,455 @@ private fun AgentControlApp(
 }
 
 @Composable
+private fun warmNavigationItemColors() = NavigationBarItemDefaults.colors(
+    selectedIconColor = MaterialTheme.colorScheme.primary,
+    selectedTextColor = MaterialTheme.colorScheme.primary,
+    indicatorColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.72f),
+    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+)
+
+@Composable
+private fun SetupPanel(
+    store: AgentControlStore,
+    onStartPairing: () -> Unit,
+    onRunDiagnostics: () -> Unit,
+    onSendStatus: () -> Unit,
+    onCopyTesterReport: () -> Unit,
+) {
+    val diagnostics = store.connectionDiagnostics()
+    val checksById = diagnostics.checks.associateBy { it.id }
+    val checklist = listOf(
+        checksById["url_reachable"]?.copy(id = "install_bridge", label = "Install desktop bridge")
+            ?: setupCheck("install_bridge", "Install desktop bridge"),
+        checksById["pairing_state"] ?: setupCheck("pairing_state", "Pair phone"),
+        checksById["bridge_health"]?.copy(id = "run_diagnostics", label = "Run diagnostics")
+            ?: setupCheck("run_diagnostics", "Run diagnostics"),
+        checksById["send_status"] ?: setupCheck("send_status", "Send /status"),
+        checksById["attachment"] ?: setupCheck("attachment", "Test attachment"),
+        checksById["reconnect"] ?: setupCheck("reconnect", "Test reconnect"),
+    )
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.surface,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.46f)),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("Setup", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        diagnostics.summary,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        if (store.pairingInfo.paired) {
+                            "${store.pairingInfo.desktopName ?: "Desktop"} · ${store.pairingInfo.desktopUrl}"
+                        } else {
+                            "Install the desktop bridge, then pair this phone with the QR code or 8-digit key."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = onStartPairing,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Start pairing", maxLines = 1)
+                    }
+                    Button(
+                        onClick = onRunDiagnostics,
+                        modifier = Modifier.weight(1f),
+                        enabled = !store.diagnosticsRunning,
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Icon(Icons.Default.Build, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (store.diagnosticsRunning) "Running..." else "Run diagnostics", maxLines = 1)
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = onSendStatus,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Send /status", maxLines = 1)
+                    }
+                    Button(
+                        onClick = onCopyTesterReport,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Copy report", maxLines = 1)
+                    }
+                }
+            }
+        }
+        items(checklist, key = { it.id }) { check ->
+            DiagnosticCheckRow(check)
+        }
+        item {
+            Text(
+                "Detailed checks",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        items(diagnostics.checks, key = { "detail-${it.id}" }) { check ->
+            DiagnosticCheckRow(check)
+        }
+        store.lastDiagnosticsError?.let { error ->
+            item {
+                Text(
+                    error,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+    }
+}
+
+private fun setupCheck(id: String, label: String) =
+    com.xiehaibo.agentcontrol.api.DiagnosticCheck(id, label, "pending", "Not tested")
+
+@Composable
+private fun DiagnosticCheckRow(check: com.xiehaibo.agentcontrol.api.DiagnosticCheck) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, diagnosticColor(check.status).copy(alpha = 0.42f)),
+    ) {
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                imageVector = diagnosticIcon(check.status),
+                contentDescription = null,
+                tint = diagnosticColor(check.status),
+                modifier = Modifier.size(20.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(check.label, fontWeight = FontWeight.SemiBold)
+                if (check.detail.isNotBlank()) {
+                    Text(
+                        check.detail,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Text(
+                check.status.uppercase(Locale.getDefault()),
+                style = MaterialTheme.typography.labelSmall,
+                color = diagnosticColor(check.status),
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun diagnosticColor(status: String): Color = when (status.lowercase(Locale.getDefault())) {
+    "pass" -> Color(0xFF5A8F58)
+    "warn", "pending" -> Color(0xFFD4A850)
+    "fail" -> WarmError
+    else -> MaterialTheme.colorScheme.onSurfaceVariant
+}
+
+private fun diagnosticIcon(status: String): ImageVector = when (status.lowercase(Locale.getDefault())) {
+    "pass" -> Icons.Default.CheckCircle
+    "fail" -> Icons.Default.Error
+    "warn" -> Icons.Default.Security
+    else -> Icons.Default.Schedule
+}
+
+@Composable
+private fun SetupOnboarding(
+    page: Int,
+    onOpenRepository: () -> Unit,
+    onCopyText: (String, String) -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
+    onContinue: () -> Unit,
+    onBack: () -> Unit,
+    onPair: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 22.dp, vertical = 26.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(
+                    "Agent Control",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OnboardingDot(active = page == 0)
+                    OnboardingDot(active = page == 1)
+                }
+            }
+            if (page == 0) {
+                BackendInstallPage(
+                    modifier = Modifier.weight(1f),
+                    onOpenRepository = onOpenRepository,
+                    onCopyText = onCopyText,
+                    onOpenPrivacyPolicy = onOpenPrivacyPolicy,
+                    onContinue = onContinue,
+                )
+            } else {
+                PairingStartPage(
+                    modifier = Modifier.weight(1f),
+                    onCopyText = onCopyText,
+                    onBack = onBack,
+                    onPair = onPair,
+                    onSkip = onSkip,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnboardingDot(active: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(if (active) 22.dp else 8.dp, 8.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline.copy(alpha = 0.42f)),
+    )
+}
+
+@Composable
+private fun BackendInstallPage(
+    modifier: Modifier,
+    onOpenRepository: () -> Unit,
+    onCopyText: (String, String) -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
+    onContinue: () -> Unit,
+) {
+    val installPrompt = "Go to $AGENT_CONTROL_REPO_URL, read docs/self-hosted-relay.md, install/start the desktop bridge, deploy a self-hosted relay if remote access is needed, then open http://127.0.0.1:7149 for pairing."
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        OnboardingHeroIcon(Icons.Default.Terminal)
+        Text(
+            "Install the desktop side first",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            "Open the GitHub repo on your computer and ask your coding agent to install the bridge and relay pieces before pairing this phone.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OnboardingInfoBlock(
+            title = "Repository",
+            body = AGENT_CONTROL_REPO_URL,
+            onCopy = { onCopyText("Repository", AGENT_CONTROL_REPO_URL) },
+        )
+        OnboardingInfoBlock(
+            title = "Prompt for your agent",
+            body = installPrompt,
+            onCopy = { onCopyText("Agent setup prompt", installPrompt) },
+        )
+        Spacer(Modifier.heightIn(min = 4.dp))
+        Button(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onOpenRepository,
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Icon(Icons.Default.Folder, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Open GitHub repo")
+        }
+        TextButton(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onOpenPrivacyPolicy,
+        ) {
+            Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Privacy policy")
+        }
+        Button(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onContinue,
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Text("Continue to pairing")
+        }
+    }
+}
+
+@Composable
+private fun PairingStartPage(
+    modifier: Modifier,
+    onCopyText: (String, String) -> Unit,
+    onBack: () -> Unit,
+    onPair: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    val desktopPairingUrl = "http://127.0.0.1:7149"
+    val remoteAccessPrompt = "Use the self-hosted Cloudflare relay URL shown by your agent, such as https://agent-control-relay.<account>.workers.dev."
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        OnboardingHeroIcon(Icons.Default.QrCodeScanner)
+        Text(
+            "Pair this phone",
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            "When the desktop bridge is running, open http://127.0.0.1:7149 on that computer. Scan the QR code, or enter the relay/direct address and 8-digit key manually.",
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OnboardingInfoBlock(
+            title = "Remote access",
+            body = remoteAccessPrompt,
+            onCopy = { onCopyText("Remote access note", remoteAccessPrompt) },
+        )
+        OnboardingInfoBlock(
+            title = "Direct / VPN",
+            body = "Open $desktopPairingUrl on the desktop. Use http://<desktop-ip>:7149 or http://<tailscale-ip>:7149 only when the phone can reach the computer directly.",
+            onCopy = { onCopyText("Desktop pairing URL", desktopPairingUrl) },
+        )
+        Spacer(Modifier.heightIn(min = 4.dp))
+        Button(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = onPair,
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Icon(Icons.Default.QrCodeScanner, contentDescription = null, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Start pairing")
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onBack) {
+                Text("Back")
+            }
+            TextButton(onClick = onSkip) {
+                Text("Skip for now")
+            }
+        }
+    }
+}
+
+@Composable
+private fun OnboardingHeroIcon(icon: ImageVector) {
+    Box(
+        modifier = Modifier
+            .size(64.dp)
+            .clip(RoundedCornerShape(18.dp))
+            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.82f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(30.dp),
+        )
+    }
+}
+
+@Composable
+private fun OnboardingInfoBlock(
+    title: String,
+    body: String,
+    onCopy: (() -> Unit)? = null,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.44f)),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    title,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (onCopy != null) {
+                    IconButton(onClick = onCopy, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.ContentCopy, contentDescription = "Copy $title", modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+            Text(
+                body,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+@Composable
 private fun ChatPanel(
     store: AgentControlStore,
 ) {
@@ -415,14 +1124,22 @@ private fun ChatPanel(
     val messageListState = rememberLazyListState()
     var openConversationId by rememberSaveable { mutableStateOf<String?>(null) }
     var sendingMessageId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showAgentDetails by rememberSaveable { mutableStateOf(false) }
+    var showTeamDetails by rememberSaveable { mutableStateOf(false) }
     var pendingCameraUri by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingCameraName by rememberSaveable { mutableStateOf<String?>(null) }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
             store.queueAttachment(
                 uri = it.toString(),
                 name = it.bestName("file"),
-                mimeType = "application/octet-stream",
+                mimeType = context.contentResolver.getType(it) ?: "application/octet-stream",
             )
         }
     }
@@ -509,9 +1226,10 @@ private fun ChatPanel(
     } else {
         store.messagesForActiveConversation(activeAgent!!.id)
     }
-    val awaitingReply = conversationAwaitingReply(conversationMessages, activeTargetId)
+    val activeTyping = store.targetIsTyping(activeTargetId)
 
     LaunchedEffect(activeTargetId, conversationMessages.size) {
+        store.markConversationSeen(activeTargetId)
         if (conversationMessages.isNotEmpty()) {
             messageListState.animateScrollToItem(conversationMessages.lastIndex)
         }
@@ -615,22 +1333,26 @@ private fun ChatPanel(
             TeamConversationHeader(
                 team = activeTeam,
                 memberNames = activeTeam.memberIds.mapNotNull { memberId -> store.agents.firstOrNull { it.id == memberId }?.name },
+                isTyping = activeTyping,
                 onBack = { openConversationId = null },
                 onNewConversation = {
                     store.startNewConversation(activeTeam.id)
                     focusManager.clearFocus()
                 },
+                onInfo = { showTeamDetails = true },
             )
             TeamSharedProfile(activeTeam)
         } else {
             ConversationHeader(
                 agent = activeAgent!!,
                 parentName = activeAgent.parentId?.let { id -> store.agents.firstOrNull { it.id == id }?.name },
+                isTyping = activeTyping,
                 onBack = { openConversationId = null },
                 onNewConversation = {
                     store.startNewConversation(activeAgent.id)
                     focusManager.clearFocus()
                 },
+                onInfo = { showAgentDetails = true },
             )
         }
         LazyColumn(
@@ -649,17 +1371,11 @@ private fun ChatPanel(
                     agent = store.agents.firstOrNull { it.id == message.authorId },
                 )
             }
-            if (awaitingReply) {
-                item(key = "thinking-$activeTargetId") {
-                    ThinkingMessage(
-                        agent = activeAgent ?: activeTeam?.adminAgentId?.let { adminId ->
-                            store.agents.firstOrNull { it.id == adminId }
-                        },
-                    )
-                }
-            }
         }
-        PendingAttachments(store.pendingAttachments)
+        PendingAttachments(
+            attachments = store.pendingAttachments,
+            onRemove = { store.removePendingAttachment(it) },
+        )
         Composer(
             store = store,
             isSending = sendingMessageId != null,
@@ -694,6 +1410,7 @@ private fun ChatPanel(
                                     remoteReply to remoteSnapshot
                                 }
                             }
+                            store.clearSendFailure()
                             if (snapshot != null) {
                                 store.applySnapshot(snapshot)
                             }
@@ -715,6 +1432,7 @@ private fun ChatPanel(
                         val errorText = error.message ?: "unknown error"
                         val key = store.sessionKey
                         Log.e(BRIDGE_TAG, "send ${message.id} failed", error)
+                        store.rememberSendFailure(errorText)
                         if (errorText.contains("session_key_mismatch") || errorText.contains("not_paired") || errorText.contains("HTTP 401")) {
                             store.markPairingInvalid("Bridge session expired. Pair with the computer again, then resend the message.")
                         } else if (key != null && awaitRemoteReplyAfterSendFailure(message, key)) {
@@ -730,6 +1448,21 @@ private fun ChatPanel(
                     }
                 }
             },
+        )
+    }
+    if (showAgentDetails && activeAgent != null) {
+        AgentDetailsDialog(
+            store = store,
+            agent = activeAgent,
+            parentName = activeAgent.parentId?.let { id -> store.agents.firstOrNull { it.id == id }?.name },
+            onDismiss = { showAgentDetails = false },
+        )
+    }
+    if (showTeamDetails && activeTeam != null) {
+        TeamDetailsDialog(
+            store = store,
+            team = activeTeam,
+            onDismiss = { showTeamDetails = false },
         )
     }
 }
@@ -751,6 +1484,8 @@ private fun ConversationList(
                 team = team,
                 memberNames = team.memberIds.mapNotNull { memberId -> store.agents.firstOrNull { it.id == memberId }?.name },
                 lastMessage = store.lastMessageForActiveConversation(team.id),
+                isTyping = store.targetIsTyping(team.id),
+                unreadCount = store.unreadCompletedCount(team.id),
                 onClick = { onOpenTeam(team) },
             )
         }
@@ -759,6 +1494,8 @@ private fun ConversationList(
                 agent = agent,
                 parentName = agent.parentId?.let { id -> store.agents.firstOrNull { it.id == id }?.name },
                 lastMessage = store.lastMessageForActiveConversation(agent.id),
+                isTyping = store.targetIsTyping(agent.id),
+                unreadCount = store.unreadCompletedCount(agent.id),
                 onClick = { onOpenAgent(agent) },
             )
         }
@@ -770,6 +1507,8 @@ private fun TeamConversationRow(
     team: AgentTeam,
     memberNames: List<String>,
     lastMessage: ChatMessage?,
+    isTyping: Boolean,
+    unreadCount: Int,
     onClick: () -> Unit,
 ) {
     val preview = lastMessage?.let { message ->
@@ -782,45 +1521,53 @@ private fun TeamConversationRow(
             else -> "Shared attachment"
         }
     } ?: team.sharedProfile
+    val displayPreview = if (isTyping) "typing..." else preview
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.34f)),
+        border = BorderStroke(1.dp, LogoYellow.copy(alpha = 0.72f)),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            TeamAvatar()
+            Box {
+                TeamAvatar()
+                if (unreadCount > 0) UnreadDot(Modifier.align(Alignment.TopEnd))
+            }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(team.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     Text(
-                        lastMessage?.let { formatTime(it.createdAt) } ?: "${team.memberIds.size} members",
+                        if (isTyping) "typing" else lastMessage?.let { formatTime(it.createdAt) } ?: "${team.memberIds.size} members",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (isTyping) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Text(
                     memberNames.take(3).joinToString(", ").ifBlank { "agent team" },
                     style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.secondary,
+                    color = MaterialTheme.colorScheme.primary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    preview,
+                    displayPreview,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isTyping) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            StatusDot(AgentStatus.ONLINE)
+            if (unreadCount > 0) {
+                UnreadBadge(unreadCount)
+            } else {
+                StatusDot(AgentStatus.ONLINE)
+            }
         }
     }
 }
@@ -830,6 +1577,8 @@ private fun ConversationRow(
     agent: AgentNode,
     parentName: String?,
     lastMessage: ChatMessage?,
+    isTyping: Boolean,
+    unreadCount: Int,
     onClick: () -> Unit,
 ) {
     val preview = lastMessage?.let { message ->
@@ -839,27 +1588,31 @@ private fun ConversationRow(
             else -> "Attachment"
         }
     } ?: agent.role
+    val displayPreview = if (isTyping) "typing..." else preview
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .clickable(onClick = onClick),
         color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.48f)),
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            AgentAvatar(agent)
+            Box {
+                AgentAvatar(agent)
+                if (unreadCount > 0) UnreadDot(Modifier.align(Alignment.TopEnd))
+            }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(agent.name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                     Text(
-                        lastMessage?.let { formatTime(it.createdAt) } ?: agent.status.name.lowercase(),
+                        if (isTyping) "typing" else lastMessage?.let { formatTime(it.createdAt) } ?: agent.status.name.lowercase(),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = if (isTyping) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 Text(
@@ -870,14 +1623,18 @@ private fun ConversationRow(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    preview,
+                    displayPreview,
                     style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isTyping) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            StatusDot(agent.status)
+            if (unreadCount > 0) {
+                UnreadBadge(unreadCount)
+            } else {
+                StatusDot(agent.status)
+            }
         }
     }
 }
@@ -886,14 +1643,16 @@ private fun ConversationRow(
 private fun ConversationHeader(
     agent: AgentNode,
     parentName: String?,
+    isTyping: Boolean,
     onBack: () -> Unit,
     onNewConversation: () -> Unit,
+    onInfo: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.48f)),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
@@ -907,9 +1666,13 @@ private fun ConversationHeader(
             Column(modifier = Modifier.weight(1f)) {
                 Text(agent.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    parentName?.let { "under $it" } ?: "${agent.kind.name.lowercase()} · ${agent.status.name.lowercase()}",
+                    if (isTyping) {
+                        "typing..."
+                    } else {
+                        parentName?.let { "under $it" } ?: "${agent.kind.name.lowercase()} · ${agent.status.name.lowercase()}"
+                    },
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isTyping) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -920,7 +1683,13 @@ private fun ConversationHeader(
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)
             }
-            StatusDot(agent.status)
+            IconButton(
+                modifier = Modifier.semantics { contentDescription = "Agent details" },
+                onClick = onInfo,
+            ) {
+                Icon(Icons.Default.Info, contentDescription = null)
+            }
+            StatusDot(if (isTyping) AgentStatus.BUSY else agent.status)
         }
     }
 }
@@ -929,14 +1698,16 @@ private fun ConversationHeader(
 private fun TeamConversationHeader(
     team: AgentTeam,
     memberNames: List<String>,
+    isTyping: Boolean,
     onBack: () -> Unit,
     onNewConversation: () -> Unit,
+    onInfo: () -> Unit,
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(8.dp),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.secondary.copy(alpha = 0.34f)),
+        border = BorderStroke(1.dp, LogoYellow.copy(alpha = 0.72f)),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp),
@@ -950,9 +1721,9 @@ private fun TeamConversationHeader(
             Column(modifier = Modifier.weight(1f)) {
                 Text(team.name, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
-                    "${team.memberIds.size} members · ${memberNames.take(3).joinToString(", ")}",
+                    if (isTyping) "typing..." else "${team.memberIds.size} members · ${memberNames.take(3).joinToString(", ")}",
                     style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (isTyping) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -963,7 +1734,13 @@ private fun TeamConversationHeader(
             ) {
                 Icon(Icons.Default.Add, contentDescription = null)
             }
-            StatusDot(AgentStatus.ONLINE)
+            IconButton(
+                modifier = Modifier.semantics { contentDescription = "Team details" },
+                onClick = onInfo,
+            ) {
+                Icon(Icons.Default.Info, contentDescription = null)
+            }
+            StatusDot(if (isTyping) AgentStatus.BUSY else AgentStatus.ONLINE)
         }
     }
 }
@@ -972,7 +1749,7 @@ private fun TeamConversationHeader(
 private fun TeamSharedProfile(team: AgentTeam) {
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
         shape = RoundedCornerShape(8.dp),
     ) {
         Column(
@@ -1002,6 +1779,215 @@ private fun TeamSharedProfile(team: AgentTeam) {
 }
 
 @Composable
+private fun AgentDetailsDialog(
+    store: AgentControlStore,
+    agent: AgentNode,
+    parentName: String?,
+    onDismiss: () -> Unit,
+) {
+    val runtime = store.runtimeSettingsForTarget(agent.id)
+    val permission = store.permissionForTarget(agent.id)
+    val diagnostic = store.latestBridgeDiagnostics?.agents?.firstOrNull { it.id == agent.id }
+    val teamName = store.teams.firstOrNull { it.id == agent.teamId }?.name ?: agent.teamId
+    val recentMessage = store.messagesForActiveConversation(agent.id).asReversed().firstOrNull { it.kind == MessageKind.AGENT }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { AgentAvatar(agent) },
+        title = { Text(agent.name) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                DetailLine("Identity", "${agent.kind.name.lowercase()} · ${agent.status.name.lowercase()}")
+                DetailLine("Parent", parentName ?: "none")
+                DetailLine("Team", teamName)
+                DetailLine("Role", agent.role)
+                DetailLine("Tools", agent.tools.joinToString(", ").ifBlank { "none reported" })
+                DetailLine("Slash commands", agent.slashCommands.joinToString(" ") { it.trigger }.ifBlank { "none reported" })
+                RuntimeSettingRow(
+                    label = "Model",
+                    value = runtimeLabel(runtime.modelOptions, runtime.model, fallbackModelLabel(runtime.model)),
+                    options = runtime.modelOptions.ifEmpty { listOf(RuntimeOption(runtime.model, fallbackModelLabel(runtime.model))) },
+                    selectedId = runtime.model,
+                    onSelect = { store.updateModelForTarget(agent.id, it) },
+                )
+                RuntimeSettingRow(
+                    label = "Reasoning",
+                    value = runtimeLabel(runtime.reasoningOptions, runtime.reasoningEffort, fallbackReasoningLabel(runtime.reasoningEffort)),
+                    options = runtime.reasoningOptions.ifEmpty { listOf(RuntimeOption(runtime.reasoningEffort, fallbackReasoningLabel(runtime.reasoningEffort))) },
+                    selectedId = runtime.reasoningEffort,
+                    onSelect = { store.updateReasoningForTarget(agent.id, it) },
+                )
+                RuntimeSettingRow(
+                    label = "Permissions",
+                    value = runtimeLabel(runtime.permissionOptions, permission, fallbackPermissionLabel(permission)),
+                    options = runtime.permissionOptions.ifEmpty {
+                        listOf(
+                            RuntimeOption("read-only", "Read Only"),
+                            RuntimeOption("workspace-write", "Workspace Write"),
+                            RuntimeOption("full-access", "Full Access"),
+                        )
+                    },
+                    selectedId = permission,
+                    onSelect = { store.updatePermissionForTarget(agent.id, it) },
+                )
+                ContextMeter(
+                    progress = (runtime.contextUsedTokens.toFloat() / runtime.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f),
+                    usedTokens = runtime.contextUsedTokens,
+                    limitTokens = runtime.contextLimitTokens,
+                )
+                DetailLine("Recent action", diagnostic?.lastAction?.ifBlank { null } ?: recentMessage?.toolCalls?.lastOrNull()?.toolName ?: "none")
+                DetailLine("Recent error", diagnostic?.lastError?.ifBlank { null } ?: store.lastSendFailure ?: "none")
+                DetailLine("Diagnostic state", diagnostic?.diagnosticState ?: store.connectionDiagnostics().summary)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done") }
+        },
+    )
+}
+
+@Composable
+private fun TeamDetailsDialog(
+    store: AgentControlStore,
+    team: AgentTeam,
+    onDismiss: () -> Unit,
+) {
+    val admin = store.agents.firstOrNull { it.id == team.adminAgentId }
+    val runtime = store.runtimeSettingsForTarget(team.id)
+    val permission = store.permissionForTarget(team.id)
+    val recentActivity = store.messagesForActiveConversation(team.id)
+        .asReversed()
+        .take(3)
+        .joinToString(" / ") { message ->
+            val author = store.agents.firstOrNull { it.id == message.authorId }?.name ?: if (message.authorId == "you") "You" else message.authorId
+            "$author: ${displayMessageText(message.text).take(64)}"
+        }
+        .ifBlank { "none" }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { TeamAvatar() },
+        title = { Text(team.name) },
+        text = {
+            Column(
+                modifier = Modifier
+                    .verticalScroll(rememberScrollState())
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                DetailLine("Admin", admin?.name ?: team.adminAgentId)
+                DetailLine("Members", team.memberIds.map { memberId -> store.agents.firstOrNull { it.id == memberId }?.name ?: memberId }.joinToString(", "))
+                DetailLine("Purpose", team.purpose.ifBlank { team.sharedProfile })
+                DetailLine("Shared documents", team.sharedDocuments.joinToString(", ").ifBlank { "none" })
+                DetailLine("Posting", if (team.canAgentsPost) "agents can post to this team" else "agent posting paused")
+                RuntimeSettingRow(
+                    label = "Model",
+                    value = runtimeLabel(runtime.modelOptions, runtime.model, fallbackModelLabel(runtime.model)),
+                    options = runtime.modelOptions.ifEmpty { listOf(RuntimeOption(runtime.model, fallbackModelLabel(runtime.model))) },
+                    selectedId = runtime.model,
+                    onSelect = { store.updateModelForTarget(team.id, it) },
+                )
+                RuntimeSettingRow(
+                    label = "Reasoning",
+                    value = runtimeLabel(runtime.reasoningOptions, runtime.reasoningEffort, fallbackReasoningLabel(runtime.reasoningEffort)),
+                    options = runtime.reasoningOptions.ifEmpty { listOf(RuntimeOption(runtime.reasoningEffort, fallbackReasoningLabel(runtime.reasoningEffort))) },
+                    selectedId = runtime.reasoningEffort,
+                    onSelect = { store.updateReasoningForTarget(team.id, it) },
+                )
+                RuntimeSettingRow(
+                    label = "Permissions",
+                    value = runtimeLabel(runtime.permissionOptions, permission, fallbackPermissionLabel(permission)),
+                    options = runtime.permissionOptions.ifEmpty {
+                        listOf(
+                            RuntimeOption("read-only", "Read Only"),
+                            RuntimeOption("workspace-write", "Workspace Write"),
+                            RuntimeOption("full-access", "Full Access"),
+                        )
+                    },
+                    selectedId = permission,
+                    onSelect = { store.updatePermissionForTarget(team.id, it) },
+                )
+                DetailLine("Recent activity", recentActivity)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done") }
+        },
+    )
+}
+
+@Composable
+private fun RuntimeSettingRow(
+    label: String,
+    value: String,
+    options: List<RuntimeOption>,
+    selectedId: String,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable { expanded = true },
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.54f),
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.36f)),
+    ) {
+        Box {
+            Row(
+                modifier = Modifier.padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                Text(
+                    value,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1.2f),
+                )
+                Icon(Icons.Default.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp))
+            }
+            RuntimeDropdown(
+                expanded = expanded,
+                options = options,
+                selectedId = selectedId,
+                onDismiss = { expanded = false },
+                onSelect = {
+                    onSelect(it)
+                    expanded = false
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun DetailLine(
+    label: String,
+    value: String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+@Composable
 private fun AgentAvatar(agent: AgentNode) {
     Box(
         modifier = Modifier
@@ -1025,7 +2011,7 @@ private fun TeamAvatar() {
         modifier = Modifier
             .size(46.dp)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.22f)),
+            .background(LogoYellow.copy(alpha = 0.46f)),
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -1163,14 +2149,19 @@ private fun UserMessageBubble(message: ChatMessage) {
         Surface(
             modifier = Modifier.fillMaxWidth(0.82f),
             shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
-            color = Color(0xFFE7EAEE),
+            color = WarmUserBubble,
+            border = BorderStroke(1.dp, Color(0xFFE1DED6)),
         ) {
-            Text(
-                message.text,
+            Column(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                color = Color(0xFF14181D),
-                style = MaterialTheme.typography.bodyLarge,
-            )
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                SelectableMessageText(
+                    text = message.text,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                TransferList(message.attachments)
+            }
         }
     }
 }
@@ -1204,13 +2195,18 @@ private fun AgentMessageBubble(
             Surface(
                 shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
                 color = agentBubbleColor(agent),
+                border = BorderStroke(1.dp, agentBubbleBorderColor(agent)),
             ) {
-                Text(
-                    displayMessageText(message.text),
+                Column(
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                    color = Color.White,
-                    style = MaterialTheme.typography.bodyLarge,
-                )
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    SelectableMessageText(
+                        text = displayMessageText(message.text),
+                        color = agentBubbleTextColor(agent),
+                    )
+                    TransferList(message.attachments)
+                }
             }
             AgentActionTrail(message.toolCalls, agent)
         }
@@ -1277,7 +2273,8 @@ private fun AgentActionRow(
 ) {
     val isRunning = toolCall.status == ToolStatus.RUNNING || toolCall.status == ToolStatus.QUEUED
     val alpha = rememberPulseAlpha(isRunning)
-    val titleColor = actionTextColor(toolCall.status).copy(alpha = alpha)
+    val colors = actionColors(agent)
+    val titleColor = actionTextColor(toolCall.status, colors).copy(alpha = alpha)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1289,7 +2286,7 @@ private fun AgentActionRow(
         Icon(
             imageVector = actionIcon(toolCall),
             contentDescription = null,
-            tint = actionTextColor(toolCall.status),
+            tint = actionTextColor(toolCall.status, colors),
             modifier = Modifier
                 .padding(top = 1.dp)
                 .size(14.dp),
@@ -1310,7 +2307,7 @@ private fun AgentActionRow(
                 Text(
                     detail,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Color(0xFF8F969F).copy(alpha = if (isRunning) alpha else 0.72f),
+                    color = colors.detail.copy(alpha = if (isRunning) alpha else 0.82f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1329,13 +2326,29 @@ private fun SystemMessageBubble(message: ChatMessage) {
             shape = RoundedCornerShape(14.dp),
             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.48f),
         ) {
-            Text(
-                displayMessageText(message.text),
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            SelectionContainer {
+                Text(
+                    displayMessageText(message.text),
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun SelectableMessageText(
+    text: String,
+    color: Color,
+) {
+    SelectionContainer {
+        Text(
+            text,
+            color = color,
+            style = MaterialTheme.typography.bodyLarge,
+        )
     }
 }
 
@@ -1354,12 +2367,12 @@ private fun SystemAvatar() {
 
 @Composable
 private fun agentLogoColor(agent: AgentNode): Color = when (agent.kind) {
-    AgentKind.CODEX -> Color(0xFF111111)
+    AgentKind.CODEX -> WarmInk
     AgentKind.CLAUDE_CODE -> Color(0xFFC15F3C)
     AgentKind.ANTIGRAVITY -> Color(0xFF6C4DD5)
     AgentKind.GEMINI_CLI -> Color(0xFF4285F4)
     AgentKind.OPENCODE -> Color(0xFF00A67E)
-    AgentKind.SUBAGENT -> MaterialTheme.colorScheme.outline
+    AgentKind.SUBAGENT -> LogoOrange
 }
 
 private fun agentLogoText(agent: AgentNode): String = when (agent.kind) {
@@ -1390,7 +2403,7 @@ private fun PulsingStatusLine(text: String) {
             .padding(horizontal = 2.dp, vertical = 5.dp)
             .alpha(alpha),
         style = MaterialTheme.typography.bodyMedium,
-        color = Color(0xFFAEB4BC),
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = 5,
         overflow = TextOverflow.Ellipsis,
     )
@@ -1414,13 +2427,33 @@ private fun rememberPulseAlpha(enabled: Boolean): Float {
 
 @Composable
 private fun agentBubbleColor(agent: AgentNode?): Color = when (agent?.kind) {
-    AgentKind.CODEX -> Color(0xFF30343A)
-    AgentKind.CLAUDE_CODE -> Color(0xFF5A3A30)
-    AgentKind.ANTIGRAVITY -> Color(0xFF3D365C)
-    AgentKind.GEMINI_CLI -> Color(0xFF263C63)
-    AgentKind.OPENCODE -> Color(0xFF173F36)
-    AgentKind.SUBAGENT -> Color(0xFF374151)
+    AgentKind.CODEX -> Color(0xFFF2F0EB)
+    AgentKind.CLAUDE_CODE -> Color(0xFFFFEFE2)
+    AgentKind.ANTIGRAVITY -> Color(0xFFF1EDFF)
+    AgentKind.GEMINI_CLI -> Color(0xFFEAF3FF)
+    AgentKind.OPENCODE -> Color(0xFFE8F7F0)
+    AgentKind.SUBAGENT -> Color(0xFFF7EEDC)
     null -> MaterialTheme.colorScheme.surfaceVariant
+}
+
+@Composable
+private fun agentBubbleBorderColor(agent: AgentNode?): Color = when (agent?.kind) {
+    AgentKind.CODEX -> Color(0xFFD7D0C5)
+    AgentKind.CLAUDE_CODE -> Color(0xFFF0C1A0)
+    AgentKind.ANTIGRAVITY -> Color(0xFFD6CCFF)
+    AgentKind.GEMINI_CLI -> Color(0xFFC7DCFF)
+    AgentKind.OPENCODE -> Color(0xFFBFE6D5)
+    AgentKind.SUBAGENT -> WarmOutline
+    null -> MaterialTheme.colorScheme.outline.copy(alpha = 0.52f)
+}
+
+@Composable
+private fun agentBubbleTextColor(agent: AgentNode?): Color = when (agent?.kind) {
+    AgentKind.CLAUDE_CODE -> Color(0xFF4A2414)
+    AgentKind.ANTIGRAVITY -> Color(0xFF2F275C)
+    AgentKind.GEMINI_CLI -> Color(0xFF17345C)
+    AgentKind.OPENCODE -> Color(0xFF123E31)
+    else -> MaterialTheme.colorScheme.onSurface
 }
 
 private data class ActionColors(
@@ -1433,38 +2466,38 @@ private data class ActionColors(
 @Composable
 private fun actionColors(agent: AgentNode?): ActionColors = when (agent?.kind) {
     AgentKind.CODEX -> ActionColors(
-        container = Color(0xFF101418),
-        border = Color(0xFF343A40),
-        title = Color(0xFFE8EAED),
-        detail = Color(0xFFAEB4BC),
+        container = Color(0xFFF2F0EB),
+        border = Color(0xFFD7D0C5),
+        title = Color(0xFF46413A),
+        detail = Color(0xFF7E776D),
     )
     AgentKind.CLAUDE_CODE -> ActionColors(
-        container = Color(0xFF2F211B),
-        border = Color(0xFF8B5B43),
-        title = Color(0xFFF3C7A6),
-        detail = Color(0xFFD6A989),
+        container = Color(0xFFFFEFE2),
+        border = Color(0xFFF0C1A0),
+        title = Color(0xFF8A4726),
+        detail = Color(0xFF9A7057),
     )
     AgentKind.GEMINI_CLI -> ActionColors(
-        container = Color(0xFF13243D),
-        border = Color(0xFF3F7BE0),
-        title = Color(0xFFDDEAFF),
-        detail = Color(0xFFA9C7FF),
+        container = Color(0xFFEAF3FF),
+        border = Color(0xFFC7DCFF),
+        title = Color(0xFF315F9C),
+        detail = Color(0xFF6680A7),
     )
     AgentKind.ANTIGRAVITY -> ActionColors(
-        container = Color(0xFF211D35),
-        border = Color(0xFF7866E8),
-        title = Color(0xFFE5DFFF),
-        detail = Color(0xFFC2B8FF),
+        container = Color(0xFFF1EDFF),
+        border = Color(0xFFD6CCFF),
+        title = Color(0xFF5D4EBC),
+        detail = Color(0xFF7D72A8),
     )
     AgentKind.OPENCODE -> ActionColors(
-        container = Color(0xFF102D27),
-        border = Color(0xFF26A982),
-        title = Color(0xFFDDF8EE),
-        detail = Color(0xFFA9DEC9),
+        container = Color(0xFFE8F7F0),
+        border = Color(0xFFBFE6D5),
+        title = Color(0xFF1F795F),
+        detail = Color(0xFF5C8374),
     )
     AgentKind.SUBAGENT, null -> ActionColors(
-        container = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
-        border = MaterialTheme.colorScheme.outline.copy(alpha = 0.32f),
+        container = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+        border = MaterialTheme.colorScheme.outline.copy(alpha = 0.52f),
         title = MaterialTheme.colorScheme.onSurface,
         detail = MaterialTheme.colorScheme.onSurfaceVariant,
     )
@@ -1504,6 +2537,7 @@ private fun actionVerb(toolName: String): String {
         "ask" in name || "question" in name || "confirm" in name -> "Ask user"
         "model_fallback" in name -> "Switch model"
         "model" in name -> "Wait for model"
+        "file" in name || "attachment" in name -> "Send file"
         "permission" in name -> "Set permissions"
         "auth" in name -> "Check auth"
         "memory" in name -> "Read memory"
@@ -1511,7 +2545,8 @@ private fun actionVerb(toolName: String): String {
         "compact" in name -> "Compress context"
         "create" in name || "spawn" in name -> "Create"
         "edit" in name || "patch" in name || "save" in name || "write" in name -> "Edit"
-        "read" in name || "search" in name -> "Read"
+        "search" in name -> "Search"
+        "read" in name -> "Read"
         "build" in name -> "Build"
         "test" in name -> "Test"
         "install" in name -> "Install"
@@ -1535,10 +2570,10 @@ private fun runningActionText(message: ChatMessage, agent: AgentNode?): String {
     return if (visibleText.isBlank()) "thinking..." else visibleText
 }
 
-private fun actionTextColor(status: ToolStatus): Color = when (status) {
-    ToolStatus.QUEUED, ToolStatus.RUNNING -> Color(0xFFAEB4BC)
-    ToolStatus.SUCCESS -> Color(0xFF9AA1AA)
-    ToolStatus.FAILED -> Color(0xFFD99191)
+private fun actionTextColor(status: ToolStatus, colors: ActionColors): Color = when (status) {
+    ToolStatus.QUEUED, ToolStatus.RUNNING -> colors.detail
+    ToolStatus.SUCCESS -> colors.title
+    ToolStatus.FAILED -> WarmError
 }
 
 private fun isGenericProgressText(text: String): Boolean {
@@ -1631,24 +2666,105 @@ private fun ToolCallRow(toolCall: ToolCall) {
 
 @Composable
 private fun TransferList(transfers: List<FileTransfer>) {
+    if (transfers.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         transfers.forEach { transfer ->
-            Row(
+            AttachmentTile(
+                transfer = transfer,
+                onRemove = null,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f))
-                    .padding(8.dp),
+                    .fillMaxWidth()
+                    .heightIn(min = 54.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PendingAttachments(
+    attachments: List<FileTransfer>,
+    onRemove: (String) -> Unit,
+) {
+    if (attachments.isEmpty()) return
+    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        items(attachments, key = { it.id }) { attachment ->
+            AttachmentTile(
+                transfer = attachment,
+                onRemove = { onRemove(attachment.id) },
+                modifier = Modifier.width(168.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttachmentTile(
+    transfer: FileTransfer,
+    onRemove: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val thumbnail = rememberAttachmentThumbnail(transfer)
+    Surface(
+        modifier = modifier.combinedClickable(
+            onClick = {},
+            onLongClick = {
+                val saved = saveTransferToDownloads(context, transfer)
+                Toast.makeText(
+                    context,
+                    if (saved) "Saved to Downloads" else "Could not save this file",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            },
+        ),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.26f)),
+    ) {
+        Box {
+            Row(
+                modifier = Modifier.padding(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(18.dp))
+                AttachmentPreview(transfer, thumbnail)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(transfer.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         "${transfer.direction} · ${transfer.mimeType}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    if (transfer.sizeLabel.isNotBlank()) {
+                        Text(
+                            transfer.sizeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+            if (onRemove != null) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(4.dp)
+                        .size(26.dp),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.inverseSurface.copy(alpha = 0.56f),
+                ) {
+                    IconButton(onClick = onRemove, modifier = Modifier.size(26.dp)) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Remove attachment",
+                            tint = MaterialTheme.colorScheme.inverseOnSurface,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                 }
             }
         }
@@ -1656,18 +2772,47 @@ private fun TransferList(transfers: List<FileTransfer>) {
 }
 
 @Composable
-private fun PendingAttachments(attachments: List<FileTransfer>) {
-    if (attachments.isEmpty()) return
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(attachments, key = { it.id }) { attachment ->
-            AssistChip(
-                onClick = {},
-                label = { Text(attachment.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                leadingIcon = { Icon(Icons.Default.AttachFile, contentDescription = null, modifier = Modifier.size(18.dp)) },
-                shape = RoundedCornerShape(8.dp),
+private fun AttachmentPreview(
+    transfer: FileTransfer,
+    thumbnail: ImageBitmap?,
+) {
+    Surface(
+        modifier = Modifier.size(46.dp),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface,
+    ) {
+        if (thumbnail != null) {
+            Image(
+                bitmap = thumbnail,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
             )
+        } else {
+            Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                Icon(
+                    if (transfer.mimeType.startsWith("video/")) Icons.Default.PhotoCamera else Icons.Default.AttachFile,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
     }
+}
+
+@Composable
+private fun rememberAttachmentThumbnail(transfer: FileTransfer): ImageBitmap? {
+    val context = LocalContext.current
+    var thumbnail by remember(transfer.uri, transfer.mimeType, transfer.contentBase64) {
+        mutableStateOf<ImageBitmap?>(null)
+    }
+    LaunchedEffect(transfer.uri, transfer.mimeType, transfer.contentBase64) {
+        thumbnail = withContext(Dispatchers.IO) {
+            loadAttachmentThumbnail(context, transfer)?.asImageBitmap()
+        }
+    }
+    return thumbnail
 }
 
 @Composable
@@ -1684,31 +2829,25 @@ private fun Composer(
     var modelMenuOpen by remember { mutableStateOf(false) }
     var reasoningMenuOpen by remember { mutableStateOf(false) }
     var permissionMenuOpen by remember { mutableStateOf(false) }
-    val codex = store.codexRuntimeSettings
-    val modelLabel = runtimeLabel(codex.modelOptions, codex.model, fallbackModelLabel(codex.model))
-    val reasoningLabel = runtimeLabel(codex.reasoningOptions, codex.reasoningEffort, fallbackReasoningLabel(codex.reasoningEffort))
+    val runtime = store.runtimeSettingsForTarget(store.selectedTargetId)
+    val modelLabel = runtimeLabel(runtime.modelOptions, runtime.model, fallbackModelLabel(runtime.model))
+    val reasoningLabel = runtimeLabel(runtime.reasoningOptions, runtime.reasoningEffort, fallbackReasoningLabel(runtime.reasoningEffort))
     val targetPermission = store.permissionForTarget(store.selectedTargetId)
-    val permissionLabel = runtimeLabel(codex.permissionOptions, targetPermission, fallbackPermissionLabel(targetPermission))
+    val permissionLabel = runtimeLabel(runtime.permissionOptions, targetPermission, fallbackPermissionLabel(targetPermission))
     val planModeEnabled = targetPermission == "read-only"
-    val contextProgress = (codex.contextUsedTokens.toFloat() / codex.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f)
+    val contextProgress = (runtime.contextUsedTokens.toFloat() / runtime.contextLimitTokens.coerceAtLeast(1)).coerceIn(0f, 1f)
     val placeholderAlpha = rememberPulseAlpha(isSending)
-    val modelOptions = codex.modelOptions.ifEmpty {
+    val modelOptions = runtime.modelOptions.ifEmpty {
         listOf(
-            RuntimeOption("gpt-5.5", "5.5"),
-            RuntimeOption("gpt-5.4", "5.4"),
-            RuntimeOption("gpt-5.3-codex", "5.3 Codex"),
-            RuntimeOption("gpt-5.2", "5.2"),
+            RuntimeOption(runtime.model, fallbackModelLabel(runtime.model)),
         )
     }
-    val reasoningOptions = codex.reasoningOptions.ifEmpty {
+    val reasoningOptions = runtime.reasoningOptions.ifEmpty {
         listOf(
-            RuntimeOption("low", "Low"),
-            RuntimeOption("medium", "Medium"),
-            RuntimeOption("high", "High"),
-            RuntimeOption("xhigh", "Extra High"),
+            RuntimeOption(runtime.reasoningEffort, fallbackReasoningLabel(runtime.reasoningEffort)),
         )
     }
-    val permissionOptions = codex.permissionOptions.ifEmpty {
+    val permissionOptions = runtime.permissionOptions.ifEmpty {
         listOf(
             RuntimeOption("read-only", "Read Only"),
             RuntimeOption("workspace-write", "Workspace Write"),
@@ -1723,7 +2862,7 @@ private fun Composer(
         shape = RoundedCornerShape(28.dp),
         color = MaterialTheme.colorScheme.surface,
         tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.32f)),
+        border = BorderStroke(1.dp, LogoOrange.copy(alpha = 0.56f)),
     ) {
         Column(
             modifier = Modifier
@@ -1768,7 +2907,11 @@ private fun Composer(
             ) {
                 Box {
                     IconButton(onClick = { toolsMenuOpen = true }, modifier = Modifier.size(44.dp)) {
-                        Icon(Icons.Default.Add, contentDescription = "More actions")
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "More actions",
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
                     }
                     DropdownMenu(expanded = toolsMenuOpen, onDismissRequest = { toolsMenuOpen = false }) {
                         DropdownMenuItem(
@@ -1868,20 +3011,20 @@ private fun Composer(
                     RuntimeDropdown(
                         expanded = modelMenuOpen,
                         options = modelOptions,
-                        selectedId = codex.model,
+                        selectedId = runtime.model,
                         onDismiss = { modelMenuOpen = false },
                         onSelect = {
-                            store.updateCodexModel(it)
+                            store.updateModelForTarget(store.selectedTargetId, it)
                             modelMenuOpen = false
                         },
                     )
                     RuntimeDropdown(
                         expanded = reasoningMenuOpen,
                         options = reasoningOptions,
-                        selectedId = codex.reasoningEffort,
+                        selectedId = runtime.reasoningEffort,
                         onDismiss = { reasoningMenuOpen = false },
                         onSelect = {
-                            store.updateCodexReasoning(it)
+                            store.updateReasoningForTarget(store.selectedTargetId, it)
                             reasoningMenuOpen = false
                         },
                     )
@@ -1898,17 +3041,21 @@ private fun Composer(
                 }
                 ContextMeter(
                     progress = contextProgress,
-                    usedTokens = codex.contextUsedTokens,
-                    limitTokens = codex.contextLimitTokens,
+                    usedTokens = runtime.contextUsedTokens,
+                    limitTokens = runtime.contextLimitTokens,
                 )
                 Spacer(modifier = Modifier.weight(1f))
                 IconButton(onClick = onVoiceInput, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.Default.Mic, contentDescription = "Voice input")
+                    Icon(
+                        Icons.Default.Mic,
+                        contentDescription = "Voice input",
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
                 }
                 Surface(
                     modifier = Modifier.size(44.dp),
                     shape = CircleShape,
-                    color = if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                    color = if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.84f),
                 ) {
                     IconButton(onClick = onSend, enabled = canSend) {
                         Icon(
@@ -1979,6 +3126,16 @@ private fun fallbackModelLabel(id: String): String = when (id) {
     "gpt-5.4" -> "5.4"
     "gpt-5.3-codex" -> "5.3 Codex"
     "gpt-5.2" -> "5.2"
+    "claude-sonnet-4-6" -> "Claude Sonnet 4.6"
+    "claude-opus-4-6" -> "Claude Opus 4.6"
+    "gemini-2.5-flash" -> "Gemini 2.5 Flash"
+    "gemini-2.5-pro" -> "Gemini 2.5 Pro"
+    "gemini-3-flash-preview" -> "Gemini 3 Flash"
+    "gemini-3.1-pro-preview" -> "Gemini 3.1 Pro"
+    "deepseek/deepseek-v4-pro" -> "DeepSeek V4-Pro"
+    "openrouter/deepseek/deepseek-v3.2" -> "DeepSeek V3.2"
+    "openrouter/google/gemini-3-flash-preview" -> "Gemini 3 Flash"
+    "openrouter/anthropic/claude-opus-4.6" -> "Claude Opus 4.6"
     else -> id
 }
 
@@ -1987,6 +3144,10 @@ private fun fallbackReasoningLabel(id: String): String = when (id) {
     "medium" -> "Medium"
     "high" -> "High"
     "xhigh" -> "Extra High"
+    "max" -> "Max"
+    "minimal" -> "Minimal"
+    "off" -> "Off"
+    "default" -> "Default"
     else -> id
 }
 
@@ -2011,71 +3172,99 @@ private fun ProjectPanel(
     store: AgentControlStore,
     openChat: () -> Unit,
 ) {
+    val reports = agentReportDocuments(store)
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(store.documents, key = { it.id }) { doc ->
-                FilterChip(
-                    selected = doc.id == store.selectedDocumentId,
-                    onClick = { store.selectDocument(doc.id) },
-                    label = { Text(doc.title) },
-                    leadingIcon = {
-                        Icon(
-                            if (doc.id == "memory") Icons.Default.Memory else Icons.Default.Folder,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                        )
-                    },
-                    shape = RoundedCornerShape(8.dp),
-                )
-            }
-        }
-        DocumentEditor(store.selectedDocument(), store.editorText, { store.editorText = it })
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = { store.saveDocument() },
-                shape = RoundedCornerShape(8.dp),
-            ) {
-                Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("Save")
-            }
             TextButton(onClick = openChat) {
                 Icon(Icons.Default.Terminal, contentDescription = null, modifier = Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Open chat")
             }
         }
-        Text("Heartbeat", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("Recent Work", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            items(store.heartbeats, key = { it.id }) { heartbeat ->
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, DividerDefaults.color.copy(alpha = 0.4f)),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.Top,
-                    ) {
-                        Icon(Icons.Default.Schedule, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(heartbeat.source, fontWeight = FontWeight.SemiBold)
-                            Text(heartbeat.text)
-                        }
-                        Text(formatTime(heartbeat.createdAt), style = MaterialTheme.typography.labelSmall)
-                    }
-                }
+            items(reports, key = { it.id }) { report ->
+                AgentWorkReportCard(report)
             }
         }
+    }
+}
+
+@Composable
+private fun AgentWorkReportCard(report: ProjectDocument) {
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.42f)),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Schedule, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                Spacer(Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(report.title, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        report.path.removePrefix("agent-report://"),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Text(formatTime(report.updatedAt), style = MaterialTheme.typography.labelSmall)
+            }
+            SelectionContainer {
+                Text(
+                    report.content,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+        }
+    }
+}
+
+private fun agentReportDocuments(store: AgentControlStore): List<ProjectDocument> {
+    val bridgeReports = store.documents.filter {
+        it.path.startsWith("agent-report://") || it.id.startsWith("agent-report-")
+    }
+    if (bridgeReports.isNotEmpty()) return bridgeReports
+    return store.agents.map { agent ->
+        val recentMessages = store.messagesForActiveConversation(agent.id)
+            .asReversed()
+            .take(4)
+            .map { message ->
+                val who = if (message.kind == MessageKind.USER) "You" else agent.name
+                "- $who: ${displayMessageText(message.text).take(140)}"
+            }
+        val recentAction = store.messagesForActiveConversation(agent.id)
+            .asReversed()
+            .flatMap { it.toolCalls.asReversed() }
+            .firstOrNull()
+        ProjectDocument(
+            id = "agent-report-${agent.id}",
+            title = agent.name,
+            path = "agent-report://${agent.id}",
+            editable = false,
+            updatedAt = recentAction?.startedAt ?: store.messagesForActiveConversation(agent.id).lastOrNull()?.createdAt ?: System.currentTimeMillis(),
+            content = listOf(
+                "${agent.status.name.lowercase()} · ${agent.role}",
+                "Recent action: ${recentAction?.let { actionTitle(it, agent) } ?: "none"}",
+                "Recent messages:",
+                recentMessages.ifEmpty { listOf("- No recent work in this conversation.") }.joinToString("\n"),
+            ).joinToString("\n"),
+        )
     }
 }
 
@@ -2132,6 +3321,7 @@ private fun PairingDialog(
     error: String?,
     builtInRelayUrl: String,
     onScanQr: () -> Unit,
+    onOpenPrivacyPolicy: () -> Unit,
     onDismiss: () -> Unit,
     onForget: () -> Unit,
     onPair: () -> Unit,
@@ -2172,9 +3362,9 @@ private fun PairingDialog(
                 }
                 if (hasBuiltInRelay && !useCustomAddress) {
                     Surface(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.78f),
                         shape = RoundedCornerShape(8.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.58f)),
                     ) {
                         Row(
                             modifier = Modifier
@@ -2185,9 +3375,9 @@ private fun PairingDialog(
                         ) {
                             Icon(Icons.Default.Lock, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("Secure HTTPS relay", fontWeight = FontWeight.SemiBold)
+                                Text("Default relay", fontWeight = FontWeight.SemiBold)
                                 Text(
-                                    builtInRelayUrl,
+                                    "Use this app build's relay URL",
                                     style = MaterialTheme.typography.labelMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -2197,17 +3387,22 @@ private fun PairingDialog(
                         }
                     }
                     TextButton(onClick = { useCustomAddress = true }, enabled = !busy) {
-                        Text("Use custom address")
+                        Text("Use self-hosted or direct address")
                     }
                 } else {
                     OutlinedTextField(
                         value = store.desktopUrlDraft,
                         onValueChange = { store.desktopUrlDraft = it },
-                        label = { Text("Bridge or relay address") },
-                        placeholder = { Text("https://agent-control-relay.example.workers.dev") },
+                        label = { Text("Computer or relay address") },
+                        placeholder = { Text("https://agent-control-relay.<account>.workers.dev") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                         shape = RoundedCornerShape(8.dp),
+                    )
+                    Text(
+                        "Use a self-hosted Cloudflare relay for remote access, or a LAN/Tailscale/ZeroTier desktop URL for direct mode.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     if (hasBuiltInRelay) {
                         TextButton(
@@ -2217,7 +3412,7 @@ private fun PairingDialog(
                             },
                             enabled = !busy,
                         ) {
-                            Text("Use secure relay")
+                            Text("Use default relay")
                         }
                     }
                 }
@@ -2235,6 +3430,11 @@ private fun PairingDialog(
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.primary,
                 )
+                TextButton(onClick = onOpenPrivacyPolicy, enabled = !busy) {
+                    Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Privacy policy")
+                }
                 store.pairingInfo.desktopFingerprint?.let { fingerprint ->
                     Text(
                         "Pinned desktop ${store.pairingInfo.desktopName ?: ""} $fingerprint",
@@ -2275,13 +3475,41 @@ private fun StatusDot(status: AgentStatus) {
             .clip(CircleShape)
             .background(
                 when (status) {
-                    AgentStatus.ONLINE -> Color(0xFF80ED99)
-                    AgentStatus.BUSY -> Color(0xFFFFC857)
-                    AgentStatus.IDLE -> Color(0xFF7DD3FC)
-                    AgentStatus.PAUSED -> Color(0xFFFF7A90)
+                    AgentStatus.ONLINE -> Color(0xFF74A872)
+                    AgentStatus.BUSY -> WarmPrimary
+                    AgentStatus.IDLE -> Color(0xFFD4A850)
+                    AgentStatus.PAUSED -> WarmError
                 }
             ),
     )
+}
+
+@Composable
+private fun UnreadDot(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(13.dp)
+            .clip(CircleShape)
+            .background(Color(0xFFD33F35)),
+    )
+}
+
+@Composable
+private fun UnreadBadge(count: Int) {
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(Color(0xFFD33F35)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            if (count > 9) "9+" else count.toString(),
+            color = Color.White,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
 }
 
 private fun statusIcon(status: ToolStatus): ImageVector = when (status) {
@@ -2292,10 +3520,10 @@ private fun statusIcon(status: ToolStatus): ImageVector = when (status) {
 }
 
 private fun statusColor(status: ToolStatus): Color = when (status) {
-    ToolStatus.QUEUED -> Color(0xFF7DD3FC)
-    ToolStatus.RUNNING -> Color(0xFFFFC857)
-    ToolStatus.SUCCESS -> Color(0xFF80ED99)
-    ToolStatus.FAILED -> Color(0xFFFF7A90)
+    ToolStatus.QUEUED -> Color(0xFFD4A850)
+    ToolStatus.RUNNING -> WarmPrimary
+    ToolStatus.SUCCESS -> Color(0xFF74A872)
+    ToolStatus.FAILED -> WarmError
 }
 
 private fun formatTime(timestamp: Long): String =
@@ -2317,3 +3545,114 @@ private fun Uri.bestName(fallback: String): String =
         ?.substringAfterLast(':')
         ?.ifBlank { null }
         ?: fallback
+
+private fun loadAttachmentThumbnail(context: Context, transfer: FileTransfer): Bitmap? =
+    runCatching {
+        when {
+            transfer.mimeType.startsWith("image/") -> loadImageBitmap(context, transfer)
+            transfer.mimeType.startsWith("video/") -> loadVideoFrame(context, transfer)
+            else -> null
+        }?.let { scaleThumbnail(it) }
+    }.getOrNull()
+
+private fun loadImageBitmap(context: Context, transfer: FileTransfer): Bitmap? {
+    val bytes = transfer.inlineBytes()
+    if (bytes != null) return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    val uri = transfer.safeUri() ?: return null
+    return context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
+}
+
+private fun loadVideoFrame(context: Context, transfer: FileTransfer): Bitmap? {
+    val retriever = MediaMetadataRetriever()
+    var tempFile = transfer.inlineBytes()?.let { bytes ->
+        File.createTempFile("agent-control-video-", ".tmp", context.cacheDir).apply {
+            writeBytes(bytes)
+            deleteOnExit()
+        }
+    }
+    return try {
+        when {
+            tempFile != null -> retriever.setDataSource(tempFile.absolutePath)
+            transfer.uri.startsWith("/") -> retriever.setDataSource(transfer.uri)
+            else -> transfer.safeUri()?.let { uri ->
+                runCatching { retriever.setDataSource(context, uri) }
+                    .getOrElse {
+                        tempFile = copyUriToCache(context, uri, "agent-control-video-", ".tmp") ?: throw it
+                        retriever.setDataSource(tempFile.absolutePath)
+                    }
+            } ?: return null
+        }
+        retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+    } finally {
+        runCatching { retriever.release() }
+        tempFile?.delete()
+    }
+}
+
+private fun scaleThumbnail(bitmap: Bitmap): Bitmap {
+    val width = bitmap.width.coerceAtLeast(1)
+    val height = bitmap.height.coerceAtLeast(1)
+    val maxSide = maxOf(width, height)
+    if (maxSide <= 192) return bitmap
+    val scale = 192f / maxSide
+    return Bitmap.createScaledBitmap(bitmap, (width * scale).toInt().coerceAtLeast(1), (height * scale).toInt().coerceAtLeast(1), true)
+}
+
+private fun FileTransfer.inlineBytes(): ByteArray? {
+    val raw = when {
+        contentBase64.isNotBlank() -> contentBase64
+        uri.startsWith("data:", ignoreCase = true) && ";base64," in uri -> uri.substringAfter(";base64,")
+        else -> return null
+    }
+    return runCatching { Base64.decode(raw, Base64.DEFAULT) }.getOrNull()
+}
+
+private fun FileTransfer.safeUri(): Uri? =
+    runCatching {
+        when {
+            uri.isBlank() -> null
+            uri.startsWith("/") -> Uri.fromFile(File(uri))
+            else -> Uri.parse(uri)
+        }
+    }.getOrNull()
+
+private fun saveTransferToDownloads(context: Context, transfer: FileTransfer): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+    val resolver = context.contentResolver
+    val displayName = transfer.name.ifBlank { "agent-control-${System.currentTimeMillis()}" }
+    val values = ContentValues().apply {
+        put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+        put(MediaStore.Downloads.MIME_TYPE, transfer.mimeType.ifBlank { "application/octet-stream" })
+        put(MediaStore.Downloads.IS_PENDING, 1)
+    }
+    val destination = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+    return runCatching {
+        resolver.openOutputStream(destination)?.use { output ->
+            val inline = transfer.inlineBytes()
+            if (inline != null) {
+                output.write(inline)
+            } else if (transfer.uri.startsWith("/")) {
+                FileInputStream(File(transfer.uri)).use { it.copyTo(output) }
+            } else {
+                val uri = transfer.safeUri() ?: error("missing source uri")
+                resolver.openInputStream(uri)?.use { it.copyTo(output) } ?: error("missing source stream")
+            }
+        } ?: error("missing destination stream")
+        values.clear()
+        values.put(MediaStore.Downloads.IS_PENDING, 0)
+        resolver.update(destination, values, null, null)
+        true
+    }.getOrElse {
+        runCatching { resolver.delete(destination, null, null) }
+        false
+    }
+}
+
+private fun copyUriToCache(context: Context, uri: Uri, prefix: String, suffix: String): File? =
+    runCatching {
+        val file = File.createTempFile(prefix, suffix, context.cacheDir)
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            file.outputStream().use { output -> input.copyTo(output) }
+        } ?: return null
+        file
+    }.getOrNull()

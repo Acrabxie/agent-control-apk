@@ -25,7 +25,8 @@ const RELAY_ALLOW_DIRECT_FALLBACK = process.env.AGENT_CONTROL_RELAY_ALLOW_DIRECT
 const VERSION = "agent-control.v1";
 const PAIRING_TTL_MS = 5 * 60 * 1000;
 const PAIRING_MAX_ATTEMPTS = 5;
-const RELAY_POLL_MS = 1500;
+const RELAY_POLL_MS = 750;
+const RELAY_POLL_TIMEOUT_MS = 35_000;
 const RELAY_OFFER_REFRESH_MS = 30_000;
 const RELAY_FETCH_ATTEMPTS = 3;
 const RELAY_FETCH_TIMEOUT_MS = 8_000;
@@ -55,6 +56,62 @@ const CODEX_PERMISSION_OPTIONS = [
   { id: "workspace-write", label: "Workspace Write", sandbox: "workspace-write", approval: "never" },
   { id: "full-access", label: "Full Access", sandbox: "danger-full-access", approval: "never" },
 ];
+const CLAUDE_DEFAULT_MODEL = "claude-sonnet-4-6";
+const CLAUDE_MODEL_OPTIONS = [
+  { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", contextLimitTokens: 200000 },
+  { id: "claude-opus-4-6", label: "Claude Opus 4.6", contextLimitTokens: 200000 },
+  { id: "sonnet", label: "sonnet", contextLimitTokens: 200000 },
+  { id: "opus", label: "opus", contextLimitTokens: 200000 },
+];
+const CLAUDE_REASONING_OPTIONS = [
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" },
+  { id: "xhigh", label: "Extra High" },
+  { id: "max", label: "Max" },
+];
+const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
+const GEMINI_MODEL_OPTIONS = [
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", contextLimitTokens: 1048576 },
+  { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", contextLimitTokens: 1048576 },
+  { id: "gemini-3-flash-preview", label: "Gemini 3 Flash", contextLimitTokens: 1048576 },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", contextLimitTokens: 1048576 },
+];
+const GEMINI_REASONING_OPTIONS = [
+  { id: "default", label: "Default" },
+];
+const ANTIGRAVITY_DEFAULT_MODEL = "openrouter/deepseek/deepseek-v3.2";
+const ANTIGRAVITY_MODEL_OPTIONS = [
+  { id: "openrouter/deepseek/deepseek-v3.2", label: "DeepSeek V3.2", contextLimitTokens: 160000 },
+  { id: "openrouter/google/gemini-3-flash-preview", label: "Gemini 3 Flash", contextLimitTokens: 1048576 },
+  { id: "openrouter/anthropic/claude-opus-4.6", label: "Claude Opus 4.6", contextLimitTokens: 200000 },
+  { id: "openrouter/google/gemini-3.1-pro-preview", label: "Gemini 3.1 Pro", contextLimitTokens: 1048576 },
+  { id: "openai/gpt-5.4", label: "GPT 5.4", contextLimitTokens: 266000 },
+  { id: "openai-codex/gpt-5.4", label: "Codex GPT 5.4", contextLimitTokens: 266000 },
+];
+const ANTIGRAVITY_REASONING_OPTIONS = [
+  { id: "off", label: "Off" },
+  { id: "minimal", label: "Minimal" },
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" },
+  { id: "xhigh", label: "Extra High" },
+];
+const OPENCODE_DEFAULT_MODEL = "deepseek/deepseek-v4-pro";
+const OPENCODE_MODEL_OPTIONS = [
+  { id: "deepseek/deepseek-v4-pro", label: "DeepSeek V4-Pro", contextLimitTokens: 128000 },
+  { id: "openrouter/deepseek/deepseek-v3.2", label: "DeepSeek V3.2", contextLimitTokens: 160000 },
+  { id: "openrouter/google/gemini-3-flash-preview", label: "Gemini 3 Flash", contextLimitTokens: 1048576 },
+  { id: "openrouter/anthropic/claude-opus-4.6", label: "Claude Opus 4.6", contextLimitTokens: 200000 },
+];
+const OPENCODE_REASONING_OPTIONS = [
+  { id: "default", label: "Default" },
+  { id: "minimal", label: "Minimal" },
+  { id: "low", label: "Low" },
+  { id: "medium", label: "Medium" },
+  { id: "high", label: "High" },
+  { id: "max", label: "Max" },
+];
 
 const persistedBridgeState = loadPrivateBridgeState();
 const livePair = loadOrCreateLivePair(persistedBridgeState);
@@ -78,7 +135,9 @@ let privateStateSaveTimer = null;
 const SUBAGENT_DIRECTIVE = "AGENT_CONTROL_CREATE_SUBAGENT";
 const TEAM_DIRECTIVE = "AGENT_CONTROL_CREATE_TEAM";
 const TEAM_MESSAGE_DIRECTIVE = "AGENT_CONTROL_TEAM_MESSAGE";
+const FILE_DIRECTIVE = "AGENT_CONTROL_SEND_FILE";
 const TEAM_ROUND_MAX_SPEAKERS = 2;
+const MAX_INLINE_AGENT_FILE_BYTES = 5 * 1024 * 1024;
 
 const commands = [
   ["/status", "Status", "team"],
@@ -86,6 +145,15 @@ const commands = [
   ["/spawn", "Spawn", "selected"],
   ["/team", "Team", "team"],
   ["/team-create", "New team", "team"],
+  ["/start", "Start", "chat"],
+  ["/commands", "Commands", "chat"],
+  ["/new", "New chat", "chat"],
+  ["/model", "Model", "selected"],
+  ["/reasoning", "Reasoning", "selected"],
+  ["/permissions", "Permissions", "selected"],
+  ["/context", "Context", "selected"],
+  ["/compact", "Compact", "selected"],
+  ["/diagnostics", "Diagnostics", "team"],
   ["/parent", "Parent", "selected"],
   ["/memory", "Memory", "project"],
   ["/heartbeat", "Heartbeat", "project"],
@@ -123,6 +191,13 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["shell", "patch", "browser", "notion", "android-build", "bridge"],
+    slashCommands: [
+      { trigger: "/plan", label: "Plan", target: "selected" },
+      { trigger: "/diff", label: "Diff", target: "selected" },
+      { trigger: "/review", label: "Review", target: "selected" },
+      { trigger: "/test", label: "Test", target: "selected" },
+      { trigger: "/commit", label: "Commit", target: "selected" },
+    ],
     canSpawnChildren: true,
   },
   {
@@ -134,6 +209,13 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["repo-read", "edit", "test", "review"],
+    slashCommands: [
+      { trigger: "/plan", label: "Plan", target: "selected" },
+      { trigger: "/edit", label: "Edit", target: "selected" },
+      { trigger: "/diff", label: "Diff", target: "selected" },
+      { trigger: "/review", label: "Review", target: "selected" },
+      { trigger: "/login", label: "Login status", target: "selected" },
+    ],
     canSpawnChildren: true,
   },
   {
@@ -145,6 +227,11 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["browser", "manual-check", "visual-review"],
+    slashCommands: [
+      { trigger: "/review", label: "Review", target: "selected" },
+      { trigger: "/screenshot", label: "Screenshot", target: "selected" },
+      { trigger: "/issues", label: "Issues", target: "selected" },
+    ],
     canSpawnChildren: true,
   },
   {
@@ -156,6 +243,12 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["gemini", "planning", "analysis", "review"],
+    slashCommands: [
+      { trigger: "/ask", label: "Ask", target: "selected" },
+      { trigger: "/plan", label: "Plan", target: "selected" },
+      { trigger: "/research", label: "Research", target: "selected" },
+      { trigger: "/review", label: "Review", target: "selected" },
+    ],
     canSpawnChildren: true,
   },
   {
@@ -167,6 +260,12 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["opencode", "deepseek-v4-pro", "coding", "review"],
+    slashCommands: [
+      { trigger: "/run", label: "Run", target: "selected" },
+      { trigger: "/edit", label: "Edit", target: "selected" },
+      { trigger: "/test", label: "Test", target: "selected" },
+      { trigger: "/review", label: "Review", target: "selected" },
+    ],
     canSpawnChildren: true,
   },
 ];
@@ -214,10 +313,16 @@ const server = createServer(async (req, res) => {
       return sendEncrypted(res, session, "snapshot", await snapshot());
     }
 
+    if (req.method === "GET" && url.pathname === "/v1/diagnostics") {
+      const session = requireSession(req, res);
+      if (!session) return;
+      return sendEncrypted(res, session, "diagnostics", await diagnostics(session, String(req.headers["x-device-id"] || "")));
+    }
+
     if (req.method === "GET" && url.pathname === "/v1/slash-commands") {
       const session = requireSession(req, res);
       if (!session) return;
-      return sendEncrypted(res, session, "slash.commands", commands);
+      return sendEncrypted(res, session, "slash.commands", allSlashCommands());
     }
 
     if (req.method === "GET" && url.pathname === "/v1/stream") {
@@ -486,12 +591,17 @@ async function pairingPage(req) {
   const loopback = isLoopback(req.socket.remoteAddress);
   const address = localAddresses()[0] || "127.0.0.1";
   const phoneAddress = RELAY_URL || `http://${address}:${PORT}`;
-  const addressLabel = RELAY_URL ? "Relay address" : "Phone address";
+  const addressLabel = RELAY_URL ? "Self-hosted relay address" : "Direct phone address";
   const deepLink = pairingDeepLink({ phoneAddress, pairingKey: key.key });
   const qrSvg = loopback ? await pairingQrSvg(deepLink) : "";
   const keyMarkup = loopback
     ? `<div class="qr">${qrSvg}</div><div class="key">${escapeHtml(formatPairingKey(key.key))}</div><p>Scan the QR code with your phone camera, or enter this 8-digit key in the Android app. It expires at ${escapeHtml(new Date(key.expiresAt).toLocaleTimeString())}.</p>`
     : "<p>Open this page on the desktop to see the pairing key.</p>";
+  const modeMarkup = RELAY_URL
+    ? `<p><strong>Remote mode:</strong> this bridge is using a self-hosted HTTPS relay. Use the relay address below in the Android Pair dialog, or scan the QR code.</p>
+<pre>AGENT_CONTROL_RELAY_URL=${escapeHtml(RELAY_URL)} AGENT_CONTROL_PORT=${PORT} node bridge/server.mjs</pre>`
+    : `<p><strong>Direct / VPN mode:</strong> use the direct phone address below only when the phone can reach this computer by LAN, Tailscale, ZeroTier, or another VPN.</p>
+<p>For remote access, deploy <code>relay/</code> to the user's Cloudflare account, then restart this bridge with <code>AGENT_CONTROL_RELAY_URL=https://agent-control-relay.&lt;account&gt;.workers.dev</code>.</p>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -504,11 +614,13 @@ main{width:min(520px,calc(100vw - 32px));background:#171d23;border:1px solid #33
 .lock{width:56px;height:56px;border-radius:18px;background:#22313b;display:grid;place-items:center;font-size:13px;font-weight:750;letter-spacing:.08em;margin-bottom:16px}
 h1{font-size:28px;line-height:1.1;margin:0 0 8px}
 p{color:#cbd5e1;line-height:1.45;margin:8px 0}
+strong{color:#f7fafc}
 .key{font-size:48px;font-weight:750;letter-spacing:.12em;margin:22px 0 6px;color:#7dd3fc}
 .qr{width:232px;height:232px;border-radius:18px;background:#fff;padding:14px;margin:20px 0 12px;box-sizing:border-box}
 .qr svg{display:block;width:100%;height:100%}
 .meta{margin-top:18px;padding-top:16px;border-top:1px solid #334155;font-size:14px;color:#94a3b8}
 code{color:#b5e48c}
+pre{white-space:pre-wrap;word-break:break-word;background:#0f1720;border:1px solid #334155;border-radius:12px;padding:12px;color:#b5e48c;font-size:13px;line-height:1.35}
 </style>
 </head>
 <body>
@@ -516,10 +628,11 @@ code{color:#b5e48c}
 <div class="lock">LOCK</div>
 <h1>Agent Control pairing</h1>
 ${keyMarkup}
+${modeMarkup}
 <div class="meta">
 <div>Computer: <code>${escapeHtml(hostname())}</code></div>
 <div>${escapeHtml(addressLabel)}: <code>${escapeHtml(phoneAddress)}</code></div>
-${RELAY_URL ? `<div>LAN fallback: <code>http://${escapeHtml(address)}:${PORT}</code></div>` : ""}
+${RELAY_URL ? `<div>Direct/VPN fallback: <code>http://${escapeHtml(address)}:${PORT}</code></div>` : ""}
 <div>Fingerprint: <code>${escapeHtml(desktopFingerprint)}</code></div>
 </div>
 </main>
@@ -599,6 +712,7 @@ async function pollRelay() {
       await registerRelayOffer();
       const response = await relayFetch(`${RELAY_URL}/v1/desktop/poll?desktopId=${encodeURIComponent(relayDesktopId)}`, {
         headers: { authorization: `Bearer ${relaySecret}` },
+        timeoutMs: RELAY_POLL_TIMEOUT_MS,
       });
       if (response.ok) {
         const payload = await response.json();
@@ -639,8 +753,12 @@ async function handleRelayJob(job) {
     await cacheAndPostRelayResponse(job.requestId, 200, encryptForSession(session, "snapshot", await snapshot()));
     return;
   }
+  if (job.kind === "diagnostics") {
+    await cacheAndPostRelayResponse(job.requestId, 200, encryptForSession(session, "diagnostics", await diagnostics(session, String(job.deviceId || ""))));
+    return;
+  }
   if (job.kind === "slashCommands") {
-    await cacheAndPostRelayResponse(job.requestId, 200, encryptForSession(session, "slash.commands", commands));
+    await cacheAndPostRelayResponse(job.requestId, 200, encryptForSession(session, "slash.commands", allSlashCommands()));
     return;
   }
   if (job.kind === "file") {
@@ -711,11 +829,13 @@ function relayFetch(url, init = {}) {
 async function retryRelayFetch(url, init = {}) {
   const routes = relayFetchRoutes();
   const errors = [];
+  const { timeoutMs, ...fetchInitBase } = init;
+  const effectiveTimeoutMs = Number(timeoutMs || RELAY_FETCH_TIMEOUT_MS);
   for (const route of routes) {
     for (let attempt = 1; attempt <= RELAY_FETCH_ATTEMPTS; attempt += 1) {
       try {
-        const fetchInit = route.dispatcher ? { ...init, dispatcher: route.dispatcher } : init;
-        return await fetchWithTimeout(url, fetchInit, RELAY_FETCH_TIMEOUT_MS);
+        const fetchInit = route.dispatcher ? { ...fetchInitBase, dispatcher: route.dispatcher } : fetchInitBase;
+        return await fetchWithTimeout(url, fetchInit, effectiveTimeoutMs);
       } catch (error) {
         errors.push(`${route.name}: ${describeError(error)}`);
         if (attempt < RELAY_FETCH_ATTEMPTS) await delay(650 * attempt);
@@ -725,7 +845,10 @@ async function retryRelayFetch(url, init = {}) {
   for (const route of routes) {
     try {
       console.error(`relay fetch falling back to curl ${route.name}: ${errors.at(-1) || "fetch failed"}`);
-      return await curlRelayFetch(url, init, { useProxy: route.useProxy });
+      return await curlRelayFetch(url, fetchInitBase, {
+        useProxy: route.useProxy,
+        timeoutSeconds: Math.ceil(effectiveTimeoutMs / 1000) + 2,
+      });
     } catch (error) {
       errors.push(`curl ${route.name}: ${describeError(error)}`);
     }
@@ -755,12 +878,13 @@ async function curlRelayFetch(url, init = {}, options = {}) {
   if (!commandExists("curl")) throw new Error("curl not found");
   const method = String(init.method || "GET").toUpperCase();
   const body = init.body == null ? null : String(init.body);
+  const timeoutSeconds = Number(options.timeoutSeconds || RELAY_CURL_TIMEOUT_SECONDS);
   const args = [
     "-sS",
     "--connect-timeout",
     "20",
     "--max-time",
-    String(RELAY_CURL_TIMEOUT_SECONDS),
+    String(timeoutSeconds),
     "--write-out",
     "\n__AGENT_CONTROL_HTTP_STATUS__:%{http_code}",
   ];
@@ -778,7 +902,7 @@ async function curlRelayFetch(url, init = {}, options = {}) {
 
   const { stdout } = await spawnFilePromise("curl", args, {
     input: body,
-    timeout: (RELAY_CURL_TIMEOUT_SECONDS + 5) * 1000,
+    timeout: (timeoutSeconds + 5) * 1000,
     maxBuffer: 1024 * 1024 * 12,
     env: process.env,
   });
@@ -1007,25 +1131,144 @@ async function snapshot() {
   return {
     agents,
     teams: allTeams(),
-    commands,
+    commands: allSlashCommands(),
     messages: state.messages,
     transfers: state.transfers,
     documents,
     heartbeats: state.heartbeats.slice(0, 30),
     runtimeSettings: {
       codex: codexRuntimeSnapshot(),
+      agents: agentRuntimeSnapshots(agents),
       permissionOptions: CODEX_PERMISSION_OPTIONS.map(({ id, label }) => ({ id, label })),
     },
   };
 }
 
+async function diagnostics(session, deviceId = "") {
+  const agents = allAgents();
+  const runtimeSnapshots = agentRuntimeSnapshots(agents);
+  const activeKey = ensureActivePairingKey();
+  const connectionMode = RELAY_URL ? "relay" : "direct";
+  return {
+    bridgeVersion: VERSION,
+    desktopName: hostname(),
+    generatedAt: Date.now(),
+    pairing: {
+      pairedDeviceCount: sessions.size,
+      sessionActive: Boolean(session),
+      pairedDeviceId: deviceId,
+      desktopFingerprint,
+      pendingChallenges: pairingChallenges.size,
+      keyExpiresAt: activeKey.expiresAt,
+    },
+    connectionMode,
+    relayConfigured: Boolean(RELAY_URL),
+    relayHost: relayHostLabel(),
+    pairedDeviceCount: sessions.size,
+    sessionActive: Boolean(session),
+    pairedDeviceId: deviceId,
+    agents: agents.map((agent) => agentDiagnostic(agent, runtimeSnapshots[agent.id] || runtimeSettingsForAgent(rootAdapterFor(agent)))),
+    runtimeOptions: runtimeOptionAvailability(runtimeSnapshots),
+    recentErrors: recentDiagnosticErrors(),
+  };
+}
+
+function agentDiagnostic(agent, runtimeSettings = {}) {
+  const recent = [...state.messages].reverse().find((message) =>
+    message.authorId === agent.id ||
+    message.targetAgentId === agent.id ||
+    (agent.kind === "SUBAGENT" && message.authorId === rootAdapterFor(agent).id)
+  );
+  const recentCalls = Array.isArray(recent?.toolCalls) ? recent.toolCalls : [];
+  const lastCall = [...recentCalls].reverse().find((call) => call?.toolName);
+  const failedCall = [...recentCalls].reverse().find((call) => call?.status === "FAILED");
+  const textError = recent?.kind === "AGENT" && /failed to reply|auth|timeout|offline|error/i.test(String(recent.text || ""))
+    ? firstLine(recent.text)
+    : "";
+  return {
+    id: agent.id,
+    name: agent.name,
+    kind: agent.kind,
+    status: agent.status,
+    parentId: agent.parentId || null,
+    teamId: agent.teamId || "",
+    tools: Array.isArray(agent.tools) ? agent.tools.slice(0, 20) : [],
+    model: runtimeSettings.model || "",
+    reasoningEffort: runtimeSettings.reasoningEffort || "",
+    permissionMode: runtimeSettings.permissionMode || "",
+    contextUsedTokens: Number(runtimeSettings.contextUsedTokens || 0),
+    contextLimitTokens: Number(runtimeSettings.contextLimitTokens || 0),
+    modelOptions: optionIds(runtimeSettings.modelOptions),
+    reasoningOptions: optionIds(runtimeSettings.reasoningOptions),
+    permissionOptions: optionIds(runtimeSettings.permissionOptions),
+    lastAction: diagnosticActionLabel(lastCall),
+    lastError: boundedText(failedCall?.output || textError || "", 220),
+    diagnosticState: failedCall || textError ? "warn" : agent.status === "PAUSED" ? "warn" : "ok",
+  };
+}
+
+function runtimeOptionAvailability(runtimeSnapshots = {}) {
+  return Object.fromEntries(Object.entries(runtimeSnapshots).map(([agentId, settings]) => [
+    agentId,
+    {
+      modelOptions: optionIds(settings.modelOptions),
+      reasoningOptions: optionIds(settings.reasoningOptions),
+      permissionOptions: optionIds(settings.permissionOptions),
+    },
+  ]));
+}
+
+function optionIds(options = []) {
+  return Array.isArray(options) ? options.map((option) => String(option.id || "")).filter(Boolean).slice(0, 50) : [];
+}
+
+function diagnosticActionLabel(call) {
+  if (!call) return "";
+  const status = String(call.status || "").toLowerCase();
+  const name = String(call.toolName || "agent.step");
+  const output = firstLine(call.output || call.input || "");
+  return [name, status, output].filter(Boolean).join(" / ").slice(0, 220);
+}
+
+function recentDiagnosticErrors() {
+  const errors = [];
+  for (const message of [...state.messages].reverse()) {
+    const text = String(message.text || "");
+    const textLooksError = /failed to reply|auth|timeout|offline|error/i.test(text);
+    const failedCall = Array.isArray(message.toolCalls)
+      ? [...message.toolCalls].reverse().find((call) => call?.status === "FAILED")
+      : null;
+    if (textLooksError || failedCall) {
+      errors.push(boundedText(firstLine(failedCall?.output || text), 220));
+    }
+    if (errors.length >= 8) break;
+  }
+  return [...new Set(errors.filter(Boolean))];
+}
+
+function relayHostLabel() {
+  if (!RELAY_URL) return "";
+  try {
+    return new URL(RELAY_URL).host;
+  } catch {
+    return "";
+  }
+}
+
 function runtimeContextFor(agent, payload) {
-  const permissionMode = normalizeAgentPermissionMode(payload?.agentPermissionMode || payload?.runtimeOptions?.permissionMode);
+  const rootAgent = rootAdapterFor(agent);
+  const runtimeAgent = agentHasRuntimeOptions(agent) ? agent : rootAgent;
+  const runtimeSettings = runtimeSettingsForAgent(runtimeAgent, payload?.runtimeOptions || {});
+  const requestedPermission = payload?.agentPermissionMode || payload?.runtimeOptions?.permissionMode || runtimeSettings.permissionMode;
+  const permissionMode = optionIdOrDefault(runtimeSettings.permissionOptions || CODEX_PERMISSION_OPTIONS, requestedPermission, runtimeSettings.permissionMode || "read-only");
   const baseContext = {
     conversationId: sanitizeText(payload?.conversationId, "", 140),
     permissionMode,
+    runtimeSettings: {
+      ...runtimeSettings,
+      permissionMode,
+    },
   };
-  const rootAgent = rootAdapterFor(agent);
   if (rootAgent.id !== "codex") return baseContext;
   if (payload?.runtimeOptions) {
     codexRuntimeSettings = normalizeCodexRuntimeSettings({
@@ -1039,6 +1282,33 @@ function runtimeContextFor(agent, payload) {
   return { ...baseContext, runtimeSettings: codexRuntimeSettings };
 }
 
+function agentRuntimeSnapshots(agents = allAgents()) {
+  const snapshots = {
+    codex: codexRuntimeSnapshot(),
+    claude: runtimeSettingsForAgent({ id: "claude" }),
+    gemini_cli: runtimeSettingsForAgent({ id: "gemini_cli" }),
+    antigravity: runtimeSettingsForAgent({ id: "antigravity" }),
+    opencode: runtimeSettingsForAgent({ id: "opencode" }),
+  };
+  for (const agent of agents) {
+    const root = rootAdapterFor(agent);
+    snapshots[agent.id] = agentHasRuntimeOptions(agent)
+      ? runtimeSettingsForAgent(agent)
+      : root.id === "codex" ? snapshots.codex : runtimeSettingsForAgent(root);
+  }
+  return snapshots;
+}
+
+function agentHasRuntimeOptions(agent) {
+  return runtimeOptionInputHasValues(agent?.modelOptions || agent?.models) ||
+    runtimeOptionInputHasValues(agent?.reasoningOptions || agent?.reasoning) ||
+    runtimeOptionInputHasValues(agent?.permissionOptions || agent?.permissions);
+}
+
+function runtimeOptionInputHasValues(value) {
+  return Array.isArray(value) && value.length > 0;
+}
+
 function codexRuntimeSnapshot() {
   const settings = normalizeCodexRuntimeSettings(codexRuntimeSettings);
   return {
@@ -1047,6 +1317,172 @@ function codexRuntimeSnapshot() {
     reasoningOptions: CODEX_REASONING_OPTIONS.map(({ id, label }) => ({ id, label })),
     permissionOptions: CODEX_PERMISSION_OPTIONS.map(({ id, label }) => ({ id, label })),
   };
+}
+
+function runtimeSettingsForAgent(agent, value = {}) {
+  if (agent?.id === "codex") return normalizeCodexRuntimeSettings(value && Object.keys(value).length ? value : codexRuntimeSettings);
+  const definition = runtimeDefinitionForAgent(agent);
+  return normalizeGenericRuntimeSettings(definition, value);
+}
+
+function runtimeDefinitionForAgent(agent) {
+  switch (agent?.id) {
+    case "claude":
+      return {
+        defaultModel: CLAUDE_DEFAULT_MODEL,
+        modelOptions: CLAUDE_MODEL_OPTIONS,
+        defaultReasoningEffort: "medium",
+        reasoningOptions: CLAUDE_REASONING_OPTIONS,
+      };
+    case "gemini_cli":
+      return {
+        defaultModel: GEMINI_DEFAULT_MODEL,
+        modelOptions: GEMINI_MODEL_OPTIONS,
+        defaultReasoningEffort: "default",
+        reasoningOptions: GEMINI_REASONING_OPTIONS,
+      };
+    case "antigravity":
+      return {
+        defaultModel: ANTIGRAVITY_DEFAULT_MODEL,
+        modelOptions: ANTIGRAVITY_MODEL_OPTIONS,
+        defaultReasoningEffort: "off",
+        reasoningOptions: ANTIGRAVITY_REASONING_OPTIONS,
+      };
+    case "opencode":
+      return {
+        defaultModel: OPENCODE_DEFAULT_MODEL,
+        modelOptions: OPENCODE_MODEL_OPTIONS,
+        defaultReasoningEffort: "default",
+        reasoningOptions: OPENCODE_REASONING_OPTIONS,
+      };
+    default:
+      if (agentHasRuntimeOptions(agent)) {
+        const modelOptions = normalizeRuntimeOptionList(agent.modelOptions, agent.id || "agent", agent.name || "Agent", 128000);
+        const reasoningOptions = normalizeRuntimeOptionList(agent.reasoningOptions, "default", "Default", 0);
+        return {
+          defaultModel: modelOptions[0]?.id || sanitizeText(agent?.id, "agent", 80),
+          modelOptions,
+          defaultReasoningEffort: reasoningOptions[0]?.id || "default",
+          reasoningOptions,
+          permissionOptions: normalizeRuntimeOptionList(agent.permissionOptions || CODEX_PERMISSION_OPTIONS, "read-only", "Read Only", 0),
+        };
+      }
+      return {
+        defaultModel: sanitizeText(agent?.id, "agent", 80),
+        modelOptions: [{ id: sanitizeText(agent?.id, "agent", 80), label: sanitizeText(agent?.name || agent?.id, "Agent", 80), contextLimitTokens: 128000 }],
+        defaultReasoningEffort: "default",
+        reasoningOptions: [{ id: "default", label: "Default" }],
+        permissionOptions: CODEX_PERMISSION_OPTIONS,
+      };
+  }
+}
+
+function normalizeGenericRuntimeSettings(definition, value = {}) {
+  const model = optionIdOrDefault(definition.modelOptions, value.model, definition.defaultModel);
+  const reasoningEffort = optionIdOrDefault(definition.reasoningOptions, value.reasoningEffort, definition.defaultReasoningEffort);
+  const permissionOptions = definition.permissionOptions || CODEX_PERMISSION_OPTIONS;
+  const permissionMode = optionIdOrDefault(permissionOptions, value.permissionMode, "read-only");
+  const modelInfo = definition.modelOptions.find((option) => option.id === model) || definition.modelOptions[0];
+  return {
+    model,
+    reasoningEffort,
+    permissionMode,
+    contextUsedTokens: Number.isFinite(value.contextUsedTokens) ? Math.max(0, Math.round(value.contextUsedTokens)) : 0,
+    contextLimitTokens: modelInfo.contextLimitTokens || 128000,
+    updatedAt: Date.now(),
+    modelOptions: definition.modelOptions.map(({ id, label }) => ({ id, label })),
+    reasoningOptions: definition.reasoningOptions.map(({ id, label }) => ({ id, label })),
+    permissionOptions: permissionOptions.map(({ id, label }) => ({ id, label })),
+  };
+}
+
+function normalizeRuntimeOptionList(value, fallbackId, fallbackLabel, fallbackContextLimit = 128000) {
+  const items = Array.isArray(value) ? value : [];
+  const options = items
+    .map((item) => {
+      if (typeof item === "string") {
+        const idValue = sanitizeText(item, "", 120);
+        return idValue ? { id: idValue, label: idValue, contextLimitTokens: fallbackContextLimit } : null;
+      }
+      if (item && typeof item === "object") {
+        const idValue = sanitizeText(item.id || item.value || item.model, "", 120);
+        if (!idValue) return null;
+        return {
+          id: idValue,
+          label: sanitizeText(item.label || item.name || idValue, idValue, 120),
+          contextLimitTokens: Number(item.contextLimitTokens || item.context || fallbackContextLimit) || fallbackContextLimit,
+        };
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .filter((option, index, list) => list.findIndex((item) => item.id === option.id) === index);
+  return options.length ? options : [{ id: fallbackId, label: fallbackLabel, contextLimitTokens: fallbackContextLimit }];
+}
+
+function normalizeOptionalRuntimeOptionList(value, fallbackContextLimit = 128000) {
+  const items = Array.isArray(value) ? value : [];
+  return items
+    .map((item) => {
+      if (typeof item === "string") {
+        const idValue = sanitizeText(item, "", 120);
+        return idValue ? { id: idValue, label: idValue, contextLimitTokens: fallbackContextLimit } : null;
+      }
+      if (item && typeof item === "object") {
+        const idValue = sanitizeText(item.id || item.value || item.model, "", 120);
+        if (!idValue) return null;
+        return {
+          id: idValue,
+          label: sanitizeText(item.label || item.name || idValue, idValue, 120),
+          contextLimitTokens: Number(item.contextLimitTokens || item.context || fallbackContextLimit) || fallbackContextLimit,
+        };
+      }
+      return null;
+    })
+    .filter(Boolean)
+    .filter((option, index, list) => list.findIndex((item) => item.id === option.id) === index);
+}
+
+function normalizeAgentSlashCommands(value) {
+  const items = Array.isArray(value) ? value : [];
+  return items
+    .map(normalizeSlashCommandSpec)
+    .filter(Boolean)
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.trigger === item.trigger) === index)
+    .slice(0, 24);
+}
+
+function normalizeSlashCommandSpec(item) {
+  if (typeof item === "string") {
+    const trigger = normalizeCommandTrigger(item);
+    return trigger ? { trigger, label: commandLabel(trigger), target: "selected" } : null;
+  }
+  if (!item || typeof item !== "object") return null;
+  const trigger = normalizeCommandTrigger(item.trigger || item.command || item.name);
+  if (!trigger) return null;
+  return {
+    trigger,
+    label: sanitizeText(item.label || item.title || commandLabel(trigger), commandLabel(trigger), 80),
+    target: sanitizeText(item.target || "selected", "selected", 32),
+  };
+}
+
+function normalizeCommandTrigger(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  const normalized = canonicalSlashCommand(withSlash);
+  if (!/^\/[a-z0-9][a-z0-9-]{0,48}$/i.test(normalized)) return "";
+  return normalized;
+}
+
+function commandLabel(trigger = "") {
+  return String(trigger || "")
+    .replace(/^\//, "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => part.slice(0, 1).toUpperCase() + part.slice(1))
+    .join(" ") || "Command";
 }
 
 function normalizeCodexRuntimeSettings(value = {}) {
@@ -1073,7 +1509,21 @@ function normalizeAgentPermissionMode(value, fallback = "read-only") {
 }
 
 function agentPermissionForContext(context = {}) {
-  return CODEX_PERMISSION_OPTIONS.find((option) => option.id === normalizeAgentPermissionMode(context.permissionMode || context.runtimeSettings?.permissionMode)) || CODEX_PERMISSION_OPTIONS[0];
+  const requested = context.permissionMode || context.runtimeSettings?.permissionMode;
+  const builtin = CODEX_PERMISSION_OPTIONS.find((option) => option.id === requested);
+  if (builtin) return builtin;
+  const custom = Array.isArray(context.runtimeSettings?.permissionOptions)
+    ? context.runtimeSettings.permissionOptions.find((option) => option?.id === requested)
+    : null;
+  if (custom) {
+    return {
+      id: sanitizeText(custom.id, "read-only", 120),
+      label: sanitizeText(custom.label || custom.id, custom.id, 120),
+      approval: "never",
+      sandbox: "prompt-scoped custom permission",
+    };
+  }
+  return CODEX_PERMISSION_OPTIONS[0];
 }
 
 function agentPermissionPromptLine(context = {}) {
@@ -1151,7 +1601,7 @@ async function routeMessage(payload) {
     createdAt: Date.now(),
     targetAgentId: "you",
     conversationId,
-    attachments: [],
+    attachments: directiveResult.attachments || [],
     toolCalls: completedToolCallsFor(agent, text, [], response.toolCalls, directiveResult),
   };
   state.messages.push(reply);
@@ -1168,7 +1618,9 @@ function replyIdForClientMessage(clientMessageId) {
 }
 
 function shouldReplyAsync(agent, text) {
-  if (DISABLE_REAL_AGENTS || text.startsWith("/")) return false;
+  if (DISABLE_REAL_AGENTS) return false;
+  const command = normalizeSlashCommandText(text).command;
+  if (command && !agentSlashCommand(agent, command)) return false;
   const adapter = rootAdapterFor(agent);
   return ["codex", "claude", "antigravity", "gemini_cli", "opencode"].includes(adapter.id);
 }
@@ -1202,6 +1654,7 @@ function completeReplyAsync(agent, text, pendingReply, context = {}) {
       const completed = {
         ...latestPending,
         text: directiveResult.text,
+        attachments: directiveResult.attachments || [],
         toolCalls: completedToolCallsFor(agent, text, latestPending.toolCalls, response.toolCalls, directiveResult),
       };
       replaceMessage(completed);
@@ -1296,58 +1749,61 @@ function progressMessagesFor(adapterId, context = {}) {
     ];
   }
   if (adapterId === "claude") {
+    const settings = runtimeSettingsForAgent({ id: "claude" }, context.runtimeSettings || {});
     return [
       {
         text: "Planning...",
         toolCalls: [
           toolCall("claude", "claude.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
-          toolCall("claude", "claude.plan", "RUNNING", "permission-mode plan", "building prompt"),
+          toolCall("claude", "claude.plan", "RUNNING", `model=${settings.model}`, "building prompt"),
         ],
       },
       {
         text: "Starting Claude Code...",
-        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "launching CLI")],
+        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", `claude --model ${settings.model}`, "launching CLI")],
       },
       {
         text: "Running...",
-        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "waiting for output")],
+        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", `claude --model ${settings.model}`, "waiting for output")],
       },
       {
         text: "Still running...",
-        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", "claude -p", "long-running reply")],
+        toolCalls: [toolCall("claude", "claude.invoke", "RUNNING", `claude --model ${settings.model}`, "long-running reply")],
       },
     ];
   }
   if (adapterId === "gemini_cli") {
+    const settings = runtimeSettingsForAgent({ id: "gemini_cli" }, context.runtimeSettings || {});
     return [
       {
         text: "Planning...",
         toolCalls: [
           toolCall("gemini_cli", "gemini.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
-          toolCall("gemini_cli", "gemini.plan", "RUNNING", "approval-mode plan", "building prompt"),
+          toolCall("gemini_cli", "gemini.plan", "RUNNING", `model=${settings.model}`, "building prompt"),
         ],
       },
       {
         text: "Starting Gemini CLI...",
-        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "launching CLI")],
+        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", `gemini --model ${settings.model}`, "launching CLI")],
       },
       {
         text: "Running...",
-        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "waiting for output")],
+        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", `gemini --model ${settings.model}`, "waiting for output")],
       },
       {
         text: "Still running...",
-        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", "gemini --prompt", "long-running reply")],
+        toolCalls: [toolCall("gemini_cli", "gemini.invoke", "RUNNING", `gemini --model ${settings.model}`, "long-running reply")],
       },
     ];
   }
   if (adapterId === "antigravity") {
+    const settings = runtimeSettingsForAgent({ id: "antigravity" }, context.runtimeSettings || {});
     return [
       {
         text: "Planning...",
         toolCalls: [
           toolCall("antigravity", "antigravity.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
-          toolCall("antigravity", "antigravity.plan", "RUNNING", "agent prompt", "building prompt"),
+          toolCall("antigravity", "antigravity.plan", "RUNNING", `model=${settings.model}`, "building prompt"),
         ],
       },
       {
@@ -1365,25 +1821,26 @@ function progressMessagesFor(adapterId, context = {}) {
     ];
   }
   if (adapterId === "opencode") {
+    const settings = runtimeSettingsForAgent({ id: "opencode" }, context.runtimeSettings || {});
     return [
       {
         text: "Planning...",
         toolCalls: [
           toolCall("opencode", "opencode.memory", "RUNNING", "shared-agent-loop", "reading shared memory"),
-          toolCall("opencode", "opencode.plan", "RUNNING", "opencode prompt", "building prompt"),
+          toolCall("opencode", "opencode.plan", "RUNNING", `model=${settings.model}`, "building prompt"),
         ],
       },
       {
         text: "Starting OpenCode...",
-        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "launching CLI")],
+        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", `opencode --model ${settings.model}`, "launching CLI")],
       },
       {
         text: "Running...",
-        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "waiting for output")],
+        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", `opencode --model ${settings.model}`, "waiting for output")],
       },
       {
         text: "Still running...",
-        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", "opencode run", "long-running reply")],
+        toolCalls: [toolCall("opencode", "opencode.run", "RUNNING", `opencode --model ${settings.model}`, "long-running reply")],
       },
     ];
   }
@@ -1476,33 +1933,37 @@ function pendingToolCallsFor(agent, text, context = {}, now = Date.now()) {
     ];
   }
   if (adapter.id === "claude") {
+    const settings = runtimeSettingsForAgent(adapter, context.runtimeSettings || {});
     return [
-      toolCall(agent.id, "claude.prompt", "SUCCESS", "Claude Code prompt", "plan mode, project settings", now),
+      toolCall(agent.id, "claude.prompt", "SUCCESS", `model=${settings.model}`, "plan mode, project settings", now),
       toolCall(agent.id, "claude.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "claude.permission", "SUCCESS", permission.label, claudePermissionSummary(permission), now),
-      toolCall(agent.id, "claude.invoke", "RUNNING", "claude -p", "waiting for Claude Code", now),
+      toolCall(agent.id, "claude.invoke", "RUNNING", `claude --model ${settings.model}`, "waiting for Claude Code", now),
     ];
   }
   if (adapter.id === "gemini_cli") {
+    const settings = runtimeSettingsForAgent(adapter, context.runtimeSettings || {});
     return [
-      toolCall(agent.id, "gemini.prompt", "SUCCESS", "Gemini CLI prompt", "approval-mode plan", now),
+      toolCall(agent.id, "gemini.prompt", "SUCCESS", `model=${settings.model}`, "approval-mode plan", now),
       toolCall(agent.id, "gemini.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "gemini.permission", "SUCCESS", permission.label, `approval-mode ${geminiApprovalMode(permission)}`, now),
-      toolCall(agent.id, "gemini.invoke", "RUNNING", "gemini --prompt", "waiting for Gemini CLI", now),
+      toolCall(agent.id, "gemini.invoke", "RUNNING", `gemini --model ${settings.model}`, "waiting for Gemini CLI", now),
     ];
   }
   if (adapter.id === "antigravity") {
+    const settings = runtimeSettingsForAgent(adapter, context.runtimeSettings || {});
     return [
       toolCall(agent.id, "antigravity.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "antigravity.permission", "SUCCESS", permission.label, "prompt-scoped permission policy", now),
-      toolCall(agent.id, "antigravity.agent", "RUNNING", "antigravity agent --json", "waiting for Antigravity", now),
+      toolCall(agent.id, "antigravity.agent", "RUNNING", `openclaw model ${settings.model}`, "waiting for Antigravity", now),
     ];
   }
   if (adapter.id === "opencode") {
+    const settings = runtimeSettingsForAgent(adapter, context.runtimeSettings || {});
     return [
       toolCall(agent.id, "opencode.memory", "SUCCESS", "shared-agent-loop", "default memory loaded", now),
       toolCall(agent.id, "opencode.permission", "SUCCESS", permission.label, opencodePermissionSummary(permission), now),
-      toolCall(agent.id, "opencode.run", "RUNNING", "opencode run", "waiting for OpenCode", now),
+      toolCall(agent.id, "opencode.run", "RUNNING", `opencode --model ${settings.model}`, "waiting for OpenCode", now),
     ];
   }
   return [
@@ -1527,6 +1988,15 @@ function completedToolCallsFor(agent, text, pendingCalls = [], responseCalls = [
   }
   for (const call of agentTextHookCallsForAgent(agent, directiveResult.text || "", "SUCCESS")) {
     byKey.set(`${call.toolName}:${call.input}`, call);
+  }
+  for (const transfer of directiveResult.attachments || []) {
+    byKey.set(`agent.file:${transfer.name}`, toolCall(
+      agent.id,
+      "agent.file",
+      "SUCCESS",
+      transfer.name,
+      transfer.mimeType || "file sent to phone",
+    ));
   }
   const created = [...(directiveResult.createdAgents || []), ...(directiveResult.createdTeams || [])];
   if (created.length) {
@@ -1560,6 +2030,9 @@ function agentTextHookCalls(agentId, prefix, text = "", status = "RUNNING", star
   const cleaned = boundedText(cleanCliReply(text), 1400);
   if (!cleaned) return [];
   const calls = [];
+  for (const action of agentActionHintsFromText(cleaned, prefix)) {
+    calls.push(toolCall(agentId, action.toolName, status, action.input, action.output, startedAt));
+  }
   if (looksLikePlanText(cleaned)) {
     calls.push(toolCall(agentId, `${prefix}.plan`, status, "agent plan", summarizeForAction(cleaned), startedAt));
   }
@@ -1567,6 +2040,27 @@ function agentTextHookCalls(agentId, prefix, text = "", status = "RUNNING", star
     calls.push(toolCall(agentId, `${prefix}.ask`, status, "user confirmation", summarizeForAction(cleaned), startedAt));
   }
   return calls;
+}
+
+function agentActionHintsFromText(text = "", prefix = "agent") {
+  const value = String(text || "");
+  const summary = summarizeForAction(value);
+  const hints = [];
+  const patterns = [
+    { regex: /(auto.?compact|compact|compress|compaction|context window|自动压缩|压缩上下文|上下文压缩)/i, toolName: `${prefix}.compact`, input: "context", output: summary },
+    { regex: /(search|grep|rg|ripgrep|find|lookup|检索|搜索|查找)/i, toolName: `${prefix}.search`, input: "search", output: summary },
+    { regex: /(create|created|new file|mkdir|spawn|生成|创建|新建)/i, toolName: `${prefix}.create`, input: "create", output: summary },
+    { regex: /(edit|edited|write|update|patch|save|modify|changed|修改|编辑|写入|更新|保存)/i, toolName: `${prefix}.edit`, input: "edit", output: summary },
+    { regex: /(build|assemble|compile|构建|编译)/i, toolName: `${prefix}.build`, input: "build", output: summary },
+    { regex: /(test|pytest|junit|测试|单测)/i, toolName: `${prefix}.test`, input: "test", output: summary },
+    { regex: /(install|adb|device|simulator|安装|刷机|真机|模拟器)/i, toolName: `${prefix}.install`, input: "install", output: summary },
+    { regex: /(run|exec|command|shell|invoke|执行|运行|命令)/i, toolName: `${prefix}.run`, input: "run", output: summary },
+    { regex: /(read|inspect|open|list|scan|load|读取|查看|打开|列出|扫描)/i, toolName: `${prefix}.read`, input: "read", output: summary },
+  ];
+  for (const pattern of patterns) {
+    if (pattern.regex.test(value)) hints.push(pattern);
+  }
+  return hints.slice(0, 4);
 }
 
 function firstAgentTextAction(agentId, text = "", status = "RUNNING", startedAt = Date.now()) {
@@ -1693,7 +2187,12 @@ function mergeClientConversationContext(messages = [], targetId = "", conversati
 
 function messageBelongsToTarget(message, targetId) {
   if (!targetId) return true;
-  return message.targetAgentId === targetId || message.authorId === targetId;
+  if (findTeam(targetId)) return message.targetAgentId === targetId || message.authorId === targetId;
+  if (findTeam(message.targetAgentId)) return false;
+  if (message.kind === "USER") return message.targetAgentId === targetId;
+  if (message.kind === "AGENT") return message.authorId === targetId && (!message.targetAgentId || message.targetAgentId === "you");
+  if (message.kind === "SYSTEM") return message.targetAgentId === targetId || (!message.targetAgentId && message.authorId === targetId);
+  return false;
 }
 
 function messageConversationId(message, targetId = "") {
@@ -1725,7 +2224,9 @@ async function performMessage(session, encryptedBody) {
 }
 
 async function responseFor(agent, text, extraContext = {}) {
-  if (text === "/status") {
+  const slash = normalizeSlashCommandText(text);
+  const command = slash.command;
+  if (command === "/status") {
     const versions = await Promise.all([
       commandVersion("codex"),
       commandVersion("gemini"),
@@ -1735,43 +2236,99 @@ async function responseFor(agent, text, extraContext = {}) {
     ]);
     return versions.join("\n");
   }
-  if (text === "/agents") {
+  if (command === "/agents") {
     return allAgents()
       .map((item) => `${item.name}: ${item.status}, parent=${item.parentId || "none"}`)
       .join("\n");
   }
-  if (text === "/team") {
+  if (command === "/parent") {
+    const parent = agent.parentId ? findAgent(agent.parentId) : null;
+    return parent
+      ? `${agent.name} is under ${parent.name}. Root adapter: ${rootAdapterFor(agent).name}.`
+      : `${agent.name} has no parent. Root adapter: ${rootAdapterFor(agent).name}.`;
+  }
+  if (command === "/team") {
     return allTeams()
       .map((team) => `${team.name}: admin=${agentName(team.adminAgentId)}, members=${team.memberIds.length}, shared=${team.sharedProfile}`)
       .join("\n");
   }
-  if (text.startsWith("/team-create")) {
-    const result = await createPersistentTeam(agent, parseTeamCommand(text, agent));
+  if (command === "/team-create") {
+    const result = await createPersistentTeam(agent, parseTeamCommand(slash.normalizedText, agent));
     return result.created
       ? `Created persistent team: ${result.team.name}. It will appear as a group chat in the Android app.`
       : `Persistent team already exists: ${result.team.name}.`;
   }
-  if (text === "/tools") {
+  if (command === "/tools") {
     return `${agent.name} tools: ${agent.tools.join(", ")}`;
   }
-  if (text === "/memory") {
+  if (command === "/model") {
+    return runtimeCommandSummary(agent, extraContext, "model");
+  }
+  if (command === "/reasoning") {
+    return runtimeCommandSummary(agent, extraContext, "reasoning");
+  }
+  if (command === "/permissions") {
+    return runtimeCommandSummary(agent, extraContext, "permissions");
+  }
+  if (command === "/context") {
+    const runtime = extraContext.runtimeSettings || runtimeSettingsForAgent(rootAdapterFor(agent));
+    return `${agent.name} context: ${runtime.contextUsedTokens || 0} / ${runtime.contextLimitTokens || 0} tokens.`;
+  }
+  if (command === "/compact") {
+    return "Context compaction is automatic on the desktop side. I will keep future prompts compact and scoped to this conversation.";
+  }
+  if (command === "/diagnostics") {
+    return `Bridge ${VERSION}; mode=${RELAY_URL ? "relay" : "direct"}; pairedDevices=${sessions.size}; relayConfigured=${Boolean(RELAY_URL)}; agents=${allAgents().length}.`;
+  }
+  if (command === "/memory") {
     return await safeRead(join(ROOT, "MEMORY.md"));
   }
-  if (text === "/heartbeat") {
+  if (command === "/heartbeat") {
     const today = new Date().toISOString().slice(0, 10);
     return await safeRead(join(ROOT, "daily", `${today}.md`));
   }
-  if (text === "/api") {
+  if (command === "/api") {
     return "Bridge API online: /v1/pairing-challenge /v1/pair /v1/stream /v1/messages /v1/files /v1/projects/{projectId}/documents/{documentId} /v1/slash-commands";
   }
-  if (text === "/help") {
-    return commands.map((command) => command.trigger).join(" ");
+  if (command === "/files") {
+    return "File bridge ready. Attach files from the composer, or agents can send AGENT_CONTROL_SEND_FILE directives back to the phone.";
   }
-  if (text.startsWith("/spawn")) {
-    const result = await createPersistentSubagent(agent, parseSpawnCommand(text, agent));
+  if (command === "/photo") {
+    return "Photo bridge ready. Use the camera action or attach images/videos; previews and long-press saving are supported in the app.";
+  }
+  if (command === "/handoff") {
+    return `Handoff noted for ${agent.name}. Shared queue ownership should be updated by the desktop agent when work is delegated.`;
+  }
+  if (command === "/approve") {
+    return `Approved ${agent.name} to continue the current task.`;
+  }
+  if (command === "/pause") {
+    return `Pause requested for ${agent.name}.`;
+  }
+  if (command === "/resume") {
+    return `Resume requested for ${agent.name}.`;
+  }
+  if (command === "/stop") {
+    return `Stop requested for ${agent.name}.`;
+  }
+  if (command === "/new") {
+    return "Started a new-command request. For a truly separate phone thread, use the header + button; the bridge already isolates messages by conversation id.";
+  }
+  if (command === "/clear") {
+    return "Clear is local to the phone thread. Use the header + button for a fresh conversation, or the app command registry for local clear.";
+  }
+  if (command === "/" || command === "/help") {
+    return commandHelpText(slash.rest, agent);
+  }
+  if (command === "/spawn") {
+    const result = await createPersistentSubagent(agent, parseSpawnCommand(slash.normalizedText, agent));
     return result.created
       ? `Created persistent subagent: ${result.agent.name}. It will stay in the Android app after bridge restarts.`
       : `Persistent subagent already exists: ${result.agent.name}.`;
+  }
+  if (command) {
+    const agentCommand = agentSlashCommand(agent, command);
+    if (!agentCommand) return `Unknown command ${command}. Try /help.`;
   }
 
   const adapterAgent = rootAdapterFor(agent);
@@ -1799,8 +2356,149 @@ async function responseFor(agent, text, extraContext = {}) {
   return `${agent.name} received: ${text || "(empty)"}`;
 }
 
+function normalizeSlashCommandText(text = "") {
+  const raw = String(text || "").trim().replace(/^\uFF0F/u, "/");
+  if (!raw.startsWith("/")) return { raw, command: "", rest: "", normalizedText: raw };
+  if (raw === "/") return { raw, command: "/", rest: "", normalizedText: "/" };
+  const withoutTrailingPunctuation = raw.replace(/[.。!！?？,，;；]+$/u, "");
+  const match = withoutTrailingPunctuation.match(/^\/([^\s@.。!！?？,，;；/]+)(?:@[^\s]+)?(?:\s+([\s\S]*))?$/u);
+  if (!match) {
+    const firstToken = withoutTrailingPunctuation.split(/\s+/u)[0] || "/";
+    const command = canonicalSlashCommand(firstToken.split("@")[0].toLowerCase());
+    const rest = withoutTrailingPunctuation.slice(firstToken.length).trim();
+    return { raw, command, rest, normalizedText: `${command}${rest ? ` ${rest}` : ""}` };
+  }
+  const command = canonicalSlashCommand(`/${match[1].toLowerCase()}`);
+  const rest = String(match[2] || "").trim();
+  return { raw, command, rest, normalizedText: `${command}${rest ? ` ${rest}` : ""}` };
+}
+
+function canonicalSlashCommand(command = "") {
+  const normalized = String(command || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\/+/, "/")
+    .replace(/_/g, "-");
+  const aliases = {
+    "/start": "/help",
+    "/commands": "/help",
+    "/cmds": "/help",
+    "/ls": "/agents",
+    "/agent": "/agents",
+    "/who": "/agents",
+    "/teams": "/team",
+    "/group": "/team",
+    "/groups": "/team",
+    "/newchat": "/new",
+    "/new-chat": "/new",
+    "/new-session": "/new",
+    "/reset": "/new",
+    "/models": "/model",
+    "/set-model": "/model",
+    "/think": "/reasoning",
+    "/thinking": "/reasoning",
+    "/reason": "/reasoning",
+    "/permission": "/permissions",
+    "/perms": "/permissions",
+    "/sandbox": "/permissions",
+    "/compact-context": "/compact",
+    "/memory-compact": "/compact",
+    "/health": "/diagnostics",
+    "/diag": "/diagnostics",
+    "/diagnostic": "/diagnostics",
+    "/file": "/files",
+    "/upload": "/files",
+    "/attach": "/files",
+    "/image": "/photo",
+    "/pic": "/photo",
+    "/photos": "/photo",
+    "/tool": "/tools",
+    "/continue": "/resume",
+    "/cancel": "/stop",
+    "/abort": "/stop",
+    "/mem": "/memory",
+    "/logs": "/heartbeat",
+    "/log": "/heartbeat",
+    "/docs": "/api",
+  };
+  return aliases[normalized] || normalized;
+}
+
+function commandHelpText(topic = "", agent = null) {
+  const normalizedTopic = topic ? canonicalSlashCommand(String(topic).trim().startsWith("/") ? topic.trim() : `/${topic.trim()}`) : "";
+  const descriptions = {
+    "/status": "Show bridge and local CLI status.",
+    "/agents": "List visible agents and subagents.",
+    "/team": "List team chats and shared group context.",
+    "/spawn": "Create a persistent subagent: /spawn Name | role.",
+    "/team-create": "Create a persistent team: /team-create Name | purpose.",
+    "/model": "Show this agent's current model and model ids.",
+    "/reasoning": "Show this agent's reasoning levels.",
+    "/permissions": "Show this agent's permission modes.",
+    "/context": "Show current context usage.",
+    "/compact": "Request compact-context behavior.",
+    "/diagnostics": "Show safe bridge diagnostics summary.",
+    "/new": "Start a fresh app conversation from the header + button; this command explains the current thread boundary.",
+    "/files": "Show file transfer support.",
+    "/photo": "Show photo/video attachment support.",
+    "/help": "Show commands; supports /help model.",
+  };
+  if (normalizedTopic && descriptions[normalizedTopic]) return `${normalizedTopic}: ${descriptions[normalizedTopic]}`;
+  if (normalizedTopic) {
+    const agentCommand = agentSlashCommand(agent, normalizedTopic);
+    if (agentCommand) return `${agentCommand.trigger}: ${agentCommand.label || "Agent command"}`;
+  }
+  return commandsForAgent(agent).map((item) => item.trigger).join(" ");
+}
+
+function runtimeCommandSummary(agent, context = {}, field = "model") {
+  const runtime = context.runtimeSettings || runtimeSettingsForAgent(rootAdapterFor(agent));
+  if (field === "model") {
+    return `${agent.name} model: ${runtime.model}. Available: ${optionSummary(runtime.modelOptions)}.`;
+  }
+  if (field === "reasoning") {
+    return `${agent.name} reasoning: ${runtime.reasoningEffort}. Available: ${optionSummary(runtime.reasoningOptions)}.`;
+  }
+  return `${agent.name} permissions: ${runtime.permissionMode}. Available: ${optionSummary(runtime.permissionOptions)}.`;
+}
+
+function optionSummary(options = []) {
+  const values = Array.isArray(options) ? options : [];
+  return values.map((option) => option?.id || option?.label).filter(Boolean).join(", ") || "none reported";
+}
+
 function allAgents() {
   return [...agentDefinitions, ...state.dynamicAgents];
+}
+
+function allSlashCommands() {
+  return uniqueSlashCommands([
+    ...commands,
+    ...allAgents().flatMap((agent) => normalizeAgentSlashCommands(agent.slashCommands || agent.commands)),
+  ]);
+}
+
+function commandsForAgent(agent = null) {
+  return uniqueSlashCommands([
+    ...commands,
+    ...normalizeAgentSlashCommands(agent?.slashCommands || agent?.commands),
+  ]);
+}
+
+function agentSlashCommand(agent, command) {
+  const normalized = canonicalSlashCommand(command);
+  return normalizeAgentSlashCommands(agent?.slashCommands || agent?.commands)
+    .find((item) => canonicalSlashCommand(item.trigger) === normalized);
+}
+
+function uniqueSlashCommands(list = []) {
+  const result = [];
+  for (const item of list) {
+    const normalized = normalizeSlashCommandSpec(item);
+    if (!normalized) continue;
+    if (!result.some((existing) => existing.trigger === normalized.trigger)) result.push(normalized);
+  }
+  return result;
 }
 
 function findAgent(agentId) {
@@ -1831,12 +2529,13 @@ function parseSpawnCommand(text, parent) {
 }
 
 async function applyAgentDirectives(actor, responseText, options = {}) {
-  const { text, subagentSpecs, teamSpecs, teamMessageSpecs } = parseAgentDirectives(responseText);
+  const { text, subagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs } = parseAgentDirectives(responseText);
   const createdAgents = [];
   const existingAgents = [];
   const createdTeams = [];
   const existingTeams = [];
   const postedTeamMessages = [];
+  const attachments = [];
 
   for (const spec of subagentSpecs) {
     const result = await createPersistentSubagent(actor, spec);
@@ -1852,6 +2551,10 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
     const message = await addTeamMessage(actor, spec, options.currentTeam);
     if (message) postedTeamMessages.push(message);
   }
+  for (const spec of fileSpecs) {
+    const transfer = await agentFileTransfer(actor, spec);
+    if (transfer) attachments.push(transfer);
+  }
 
   const notes = [
     ...createdAgents.map((child) => `Created persistent subagent: ${child.name}.`),
@@ -1859,12 +2562,14 @@ async function applyAgentDirectives(actor, responseText, options = {}) {
     ...createdTeams.map((team) => `Created persistent team: ${team.name}.`),
     ...existingTeams.map((team) => `Persistent team already exists: ${team.name}.`),
     ...postedTeamMessages.map((message) => `Posted to team: ${findTeam(message.targetAgentId)?.name || message.targetAgentId}.`),
+    ...attachments.map((transfer) => `Sent file: ${transfer.name}.`),
   ];
   return {
     text: [text.trim(), ...notes].filter(Boolean).join("\n\n") || "Done.",
     createdAgents,
     createdTeams,
     postedTeamMessages,
+    attachments,
   };
 }
 
@@ -1872,6 +2577,7 @@ function parseAgentDirectives(value) {
   const subagentSpecs = [];
   const teamSpecs = [];
   const teamMessageSpecs = [];
+  const fileSpecs = [];
   const lines = String(value || "").split("\n");
   const visible = [];
   for (const line of lines) {
@@ -1888,11 +2594,15 @@ function parseAgentDirectives(value) {
       const raw = trimmed.slice(TEAM_MESSAGE_DIRECTIVE.length).trim();
       const parsed = parseJsonSpec(raw) || { text: raw };
       teamMessageSpecs.push(parsed);
+    } else if (trimmed.startsWith(FILE_DIRECTIVE)) {
+      const raw = trimmed.slice(FILE_DIRECTIVE.length).trim();
+      const parsed = parseJsonSpec(raw) || { path: raw };
+      fileSpecs.push(parsed);
     } else {
       visible.push(line);
     }
   }
-  return { text: visible.join("\n"), subagentSpecs, teamSpecs, teamMessageSpecs };
+  return { text: visible.join("\n"), subagentSpecs, teamSpecs, teamMessageSpecs, fileSpecs };
 }
 
 async function applySubagentDirectives(parent, responseText) {
@@ -1926,6 +2636,10 @@ async function createPersistentSubagent(parent, spec = {}) {
     parentId: parent.id,
     teamId: parent.teamId || "core",
     tools: tools.length ? tools : ["direct-chat", "report", "handoff"],
+    modelOptions: normalizeOptionalRuntimeOptionList(spec.modelOptions || spec.models, 128000),
+    reasoningOptions: normalizeOptionalRuntimeOptionList(spec.reasoningOptions || spec.reasoning, 0),
+    permissionOptions: normalizeOptionalRuntimeOptionList(spec.permissionOptions || spec.permissions, 0),
+    slashCommands: normalizeAgentSlashCommands(spec.slashCommands || spec.commands),
     canSpawnChildren: true,
   };
   state.dynamicAgents.push(child);
@@ -1999,6 +2713,51 @@ async function addTeamMessage(actor, spec = {}, currentTeam = null) {
   schedulePrivateBridgeStateSave();
   broadcast("agent.output", message);
   return message;
+}
+
+async function agentFileTransfer(actor, spec = {}) {
+  const rawPath = sanitizeText(spec.path || spec.file || spec.uri, "", 1200);
+  const name = basename(sanitizeText(spec.name || rawPath || `agent-file-${Date.now()}.txt`, "", 180));
+  const mimeType = sanitizeText(spec.mimeType || guessMimeType(name), "application/octet-stream", 120);
+  let content = null;
+  let uri = rawPath;
+  if (spec.base64) {
+    content = Buffer.from(String(spec.base64), "base64");
+    uri = `inline:${name}`;
+  } else if (spec.text || spec.content) {
+    content = Buffer.from(String(spec.text || spec.content), "utf8");
+    uri = `inline:${name}`;
+  } else if (rawPath) {
+    try {
+      content = readFileSync(rawPath);
+    } catch (error) {
+      const failed = {
+        id: id(),
+        name,
+        mimeType,
+        direction: "DESKTOP_TO_PHONE",
+        uri: rawPath,
+        sizeLabel: `unavailable: ${firstLine(error.message)}`,
+        contentBase64: "",
+      };
+      state.transfers.push(failed);
+      return failed;
+    }
+  }
+  if (!content) return null;
+  const transfer = {
+    id: id(),
+    name,
+    mimeType,
+    direction: "DESKTOP_TO_PHONE",
+    uri,
+    sizeLabel: `${content.length} bytes`,
+    contentBase64: content.length <= MAX_INLINE_AGENT_FILE_BYTES ? content.toString("base64") : "",
+  };
+  state.transfers.push(transfer);
+  heartbeat(actor.name, `Sent file ${name} to Android.`);
+  broadcast("file.available", transfer);
+  return transfer;
 }
 
 function parseTeamCommand(text, creator) {
@@ -2246,7 +3005,7 @@ function recentConversationMessages(context = {}, target = null) {
       }
       if (!targetId) return false;
       if (conversationId && messageConversationId(message, targetId) !== conversationId) return false;
-      return message.targetAgentId === targetId || message.authorId === targetId;
+      return messageBelongsToTarget(message, targetId);
     })
     .slice(-MAX_PROMPT_MEMORY_MESSAGES);
 }
@@ -2273,8 +3032,18 @@ function compactForPrompt(value) {
 function subagentDirectiveLines() {
   return [
     "Persistent subagent protocol: if a durable specialist should be created and shown in the Android app, include one separate single-line directive:",
-    `${SUBAGENT_DIRECTIVE} {"name":"Short specialist name","role":"specific responsibility","tools":["direct-chat","report"]}`,
-    "The bridge hides that directive from chat, persists the subagent, and includes it in future app snapshots. Create at most two unless the user asks for more.",
+    `${SUBAGENT_DIRECTIVE} {"name":"Short specialist name","role":"specific responsibility","tools":["direct-chat","report"],"modelOptions":[{"id":"model/id","label":"Model label"}],"permissionOptions":[{"id":"read-only","label":"Read Only"}],"slashCommands":[{"trigger":"/review","label":"Review"}]}`,
+    "The bridge hides that directive from chat, persists the subagent, and includes it in future app snapshots. Optional runtime options and slashCommands become the exact phone app choices for that agent. Create at most two unless the user asks for more.",
+  ];
+}
+
+function agentSlashCommandLines(context = {}) {
+  const target = context.subagent || context.targetAgent || context.adapterAgent;
+  const agentCommands = normalizeAgentSlashCommands(target?.slashCommands || target?.commands);
+  if (!agentCommands.length) return [];
+  return [
+    `Agent-specific slash command manifest for ${target.name}: ${agentCommands.map((item) => `${item.trigger}=${item.label}`).join(", ")}`,
+    "If the current phone message begins with one of these commands, treat it as a command invocation for this agent and execute the matching intent. Do not merely explain the command unless the user asked for help.",
   ];
 }
 
@@ -2304,6 +3073,15 @@ function teamDirectiveLines() {
     "Agent-to-team message protocol: to post a hidden side message into a team group chat, include one separate single-line directive:",
     `${TEAM_MESSAGE_DIRECTIVE} {"teamId":"core","text":"short message to the team"}`,
     "The bridge hides directives from visible chat, persists teams, and includes them in future app snapshots.",
+  ];
+}
+
+function fileDirectiveLines() {
+  return [
+    "File-to-user protocol: if you need to send a generated or existing file to the Android user, include one separate single-line directive:",
+    `${FILE_DIRECTIVE} {"path":"/absolute/path/to/file","name":"optional-name.ext","mimeType":"application/octet-stream"}`,
+    `For small text-only files you may use: ${FILE_DIRECTIVE} {"name":"note.txt","mimeType":"text/plain","text":"file content"}`,
+    "The bridge hides the directive from chat and shows the file as an attachment in the Android conversation. Do not send secrets or private credentials.",
   ];
 }
 
@@ -2396,6 +3174,10 @@ function normalizePersistedAgent(agent) {
     parentId,
     teamId: sanitizeText(agent.teamId, "core", 32),
     tools: sanitizeTools(agent.tools),
+    modelOptions: normalizeOptionalRuntimeOptionList(agent.modelOptions || agent.models, 128000),
+    reasoningOptions: normalizeOptionalRuntimeOptionList(agent.reasoningOptions || agent.reasoning, 0),
+    permissionOptions: normalizeOptionalRuntimeOptionList(agent.permissionOptions || agent.permissions, 0),
+    slashCommands: normalizeAgentSlashCommands(agent.slashCommands || agent.commands),
     canSpawnChildren: true,
   };
 }
@@ -2405,6 +3187,7 @@ async function claudeReply(text, context = {}) {
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createClaudeStreamProgress(progressReport, startedAt);
   const permission = agentPermissionForContext(context);
+  const settings = runtimeSettingsForAgent({ id: "claude" }, context.runtimeSettings || {});
   const prompt = [
     "You are Claude Code replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=claude here and returns one plain chat reply in the encrypted message.accepted envelope.",
@@ -2415,8 +3198,10 @@ async function claudeReply(text, context = {}) {
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
+    ...agentSlashCommandLines(context),
     ...subagentDirectiveLines(),
     ...teamDirectiveLines(),
+    ...fileDirectiveLines(),
     "",
     `User message: ${text || "(empty)"}`,
   ].join("\n");
@@ -2430,10 +3215,14 @@ async function claudeReply(text, context = {}) {
 
   try {
     progressReport("Planning...", [
-      toolCall("claude", "claude.plan", "RUNNING", `permission=${permission.id}`, "preparing CLI prompt", startedAt),
+      toolCall("claude", "claude.plan", "RUNNING", `model=${settings.model}`, `permission=${permission.id}`, startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise("claude", [
       "-p",
+      "--model",
+      settings.model,
+      "--effort",
+      settings.reasoningEffort,
       "--output-format",
       "text",
       ...claudePermissionArgs(permission),
@@ -2459,7 +3248,7 @@ async function claudeReply(text, context = {}) {
     setAgentStatus("claude", "ONLINE");
     return agentResponse(reply, [
       toolCall("claude", "claude.permission", "SUCCESS", permission.label, claudePermissionSummary(permission), startedAt),
-      toolCall("claude", "claude.invoke", "SUCCESS", "claude -p --output-format text", "Claude Code returned output", startedAt),
+      toolCall("claude", "claude.invoke", "SUCCESS", `claude --model ${settings.model}`, "Claude Code returned output", startedAt),
       ...claudeToolCallsFromRun(stdout, stderr, startedAt),
       toolCall("claude", "claude.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
@@ -2516,7 +3305,10 @@ function opencodePermissionSummary(permission) {
 
 function isClaudeAuthError(error) {
   const message = String(error?.message || "");
-  return message.includes("401") || /authenticat|login|unauthorized/i.test(message);
+  return (
+    message.includes("401") ||
+    /authenticat|login|logged in|unauthorized/i.test(message)
+  );
 }
 
 function createClaudeStreamProgress(progressReport, startedAt) {
@@ -2548,19 +3340,22 @@ function claudeActionFromText(text = "", stream = "stdout") {
   const line = firstLine(text) || stream;
   const textAction = firstAgentTextAction("claude", text, "RUNNING");
   if (textAction) return textAction;
-  if (/edit|write|update|patch|save|modify|changed/i.test(line)) {
+  if (/edit|write|update|patch|save|modify|changed|修改|编辑|写入|更新|保存/i.test(line)) {
     return { text: "Editing...", toolName: "claude.edit", input: line, output: "file changes" };
   }
-  if (/create|mkdir|new file|spawn/i.test(line)) {
+  if (/create|mkdir|new file|spawn|生成|创建|新建/i.test(line)) {
     return { text: "Creating...", toolName: "claude.create", input: line, output: "new item" };
   }
-  if (/bash|shell|run|command|npm|gradle|pytest|test/i.test(line)) {
+  if (/bash|shell|run|command|npm|gradle|pytest|test|执行|运行|命令/i.test(line)) {
     return { text: "Running...", toolName: "claude.run", input: line, output: "command" };
   }
-  if (/read|search|grep|rg|inspect|open/i.test(line)) {
+  if (/search|grep|rg|ripgrep|find|query|lookup|检索|搜索|查找/i.test(line)) {
+    return { text: "Searching...", toolName: "claude.search", input: line, output: "search" };
+  }
+  if (/read|inspect|open|list|scan|load|读取|查看|打开|列出|扫描/i.test(line)) {
     return { text: "Reading...", toolName: "claude.read", input: line, output: "context" };
   }
-  if (/compact|context/i.test(line)) {
+  if (/auto.?compact|compact|compress|compaction|context window|自动压缩|压缩上下文|上下文压缩/i.test(line)) {
     return { text: "Compressing context...", toolName: "claude.compact", input: line, output: "context" };
   }
   if (/plan|todo|think/i.test(line)) {
@@ -2687,7 +3482,10 @@ function genericAgentCommandAction(agentId, commandLine = "") {
   if (/\badb\b.*(install|push)|simctl\s+install/i.test(command)) {
     return { text: "Installing...", toolName: `${prefix}.install`, input: command, output: "device install" };
   }
-  if (/\b(rg|sed|grep|find|ls|cat|nl|git\s+(status|show|diff|log))\b/i.test(command)) {
+  if (/\b(rg|grep|find|fd|ack)\b/i.test(command)) {
+    return { text: "Searching...", toolName: `${prefix}.search`, input: command, output: "search command" };
+  }
+  if (/\b(sed|ls|cat|nl|git\s+(status|show|diff|log))\b/i.test(command)) {
     return { text: "Reading...", toolName: `${prefix}.read`, input: command, output: "repo context" };
   }
   if (/\b(mkdir|touch|cp|mv|git\s+clone|gh\s+repo\s+create)\b/i.test(command)) {
@@ -2710,25 +3508,28 @@ function genericAgentActionFromText(agentId, text = "", stream = "stdout") {
   if (/model|capacity|rate.?limit|quota|retry|fallback|unavailable|waiting/i.test(line)) {
     return { text: "Waiting for model...", toolName: `${prefix}.model`, input: line, output: "model channel" };
   }
-  if (/edit|write|update|patch|save|modify|changed|diff/i.test(line)) {
+  if (/edit|write|update|patch|save|modify|changed|diff|修改|编辑|写入|更新|保存/i.test(line)) {
     return { text: "Editing...", toolName: `${prefix}.edit`, input: line, output: "file changes" };
   }
-  if (/create|mkdir|new file|spawn|team/i.test(line)) {
+  if (/create|mkdir|new file|spawn|team|生成|创建|新建/i.test(line)) {
     return { text: "Creating...", toolName: `${prefix}.create`, input: line, output: "new item" };
   }
-  if (/build|assemble|compile/i.test(line)) {
+  if (/build|assemble|compile|构建|编译/i.test(line)) {
     return { text: "Building...", toolName: `${prefix}.build`, input: line, output: "build" };
   }
-  if (/test|pytest|junit|gradle test/i.test(line)) {
+  if (/test|pytest|junit|gradle test|测试|单测/i.test(line)) {
     return { text: "Testing...", toolName: `${prefix}.test`, input: line, output: "test" };
   }
-  if (/install|adb|device|simulator/i.test(line)) {
+  if (/install|adb|device|simulator|安装|刷机|真机|模拟器/i.test(line)) {
     return { text: "Installing...", toolName: `${prefix}.install`, input: line, output: "device" };
   }
-  if (/read|search|grep|rg|inspect|open|list|scan|load|context/i.test(line)) {
+  if (/search|grep|rg|ripgrep|find|query|lookup|检索|搜索|查找/i.test(line)) {
+    return { text: "Searching...", toolName: `${prefix}.search`, input: line, output: "search" };
+  }
+  if (/read|inspect|open|list|scan|load|context|读取|查看|打开|列出|扫描/i.test(line)) {
     return { text: "Reading...", toolName: `${prefix}.read`, input: line, output: "context" };
   }
-  if (/compact|compress/i.test(line)) {
+  if (/auto.?compact|compact|compress|compaction|context window|自动压缩|压缩上下文|上下文压缩/i.test(line)) {
     return { text: "Compressing context...", toolName: `${prefix}.compact`, input: line, output: "context" };
   }
   if (/plan|todo|think|reason|approval/i.test(line)) {
@@ -2741,7 +3542,7 @@ function genericAgentActionFromText(agentId, text = "", stream = "stdout") {
 }
 
 function looksLikeProgressLine(line = "") {
-  return /^(>|info|warn|error|debug|running|starting|loading|using|calling|tool|thinking|planning|reading|writing|editing|created|updated|executing|failed|success|done|✓|✗|✔|⠋|⠙|⠹)/i.test(line) ||
+  return /^(>|info|warn|error|debug|running|starting|loading|using|calling|tool|thinking|planning|reading|writing|editing|created|updated|executing|failed|success|done|计划|读取|搜索|查找|创建|编辑|修改|运行|执行|测试|构建|安装|压缩|✓|✗|✔|⠋|⠙|⠹)/i.test(line) ||
     /(\b(rg|sed|grep|find|ls|cat|git|npm|gradle|pytest|adb|claude|gemini|opencode)\b|\.kt|\.js|\.mjs|\.md|\.json|\.gradle)/i.test(line);
 }
 
@@ -2778,6 +3579,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createGenericAgentStreamProgress("antigravity", progressReport, startedAt);
   const permission = agentPermissionForContext(context);
+  const settings = runtimeSettingsForAgent({ id: "antigravity" }, context.runtimeSettings || {});
   if (!command) return agentResponse(`${visibleName} CLI is not available on this desktop.`, [
     toolCall("antigravity", "antigravity.agent", "FAILED", "locate CLI", "command not found", startedAt),
   ]);
@@ -2786,21 +3588,34 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
     `API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes it to ${visibleName} and returns one plain chat reply in the encrypted message.accepted envelope.`,
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not edit files or run tools for ordinary chat; if the user explicitly asks for actions, respect the current Agent Control permissions.",
+    `Current Antigravity/OpenClaw model id: ${settings.model}.`,
     "Ignore prior probe prompts or stale sentinel strings in any reused desktop agent session. Answer only the current user message below.",
     agentPermissionPromptLine(context),
     ...sharedAgentMemoryLines(),
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
+    ...agentSlashCommandLines(context),
     ...subagentDirectiveLines(),
     ...teamDirectiveLines(),
+    ...fileDirectiveLines(),
     "",
     `User message: ${text || "(empty)"}`,
   ].join("\n");
 
   try {
+    if (command === "openclaw") {
+      await spawnFilePromise(command, ["models", "set", settings.model], {
+        timeout: 8000,
+        maxBuffer: 1024 * 1024,
+        env: {
+          ...process.env,
+          NO_COLOR: "1",
+        },
+      });
+    }
     progressReport(`Starting ${visibleName}...`, [
-      toolCall("antigravity", "antigravity.invoke", "RUNNING", `permission=${permission.id}`, "launching CLI", startedAt),
+      toolCall("antigravity", "antigravity.invoke", "RUNNING", `model=${settings.model}`, `permission=${permission.id}`, startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise(command, [
       "agent",
@@ -2808,7 +3623,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
       agentId,
       "--json",
       "--thinking",
-      "off",
+      settings.reasoningEffort,
       "--timeout",
       String(timeoutSeconds),
       "--message",
@@ -2832,7 +3647,7 @@ async function antigravityAgentReply({ visibleName, agentId, text, timeoutSecond
     }
     return agentResponse(reply, [
       toolCall("antigravity", "antigravity.permission", "SUCCESS", permission.label, "prompt-scoped permission policy", startedAt),
-      toolCall("antigravity", "antigravity.invoke", "SUCCESS", `${command} agent --json`, "agent returned output", startedAt),
+      toolCall("antigravity", "antigravity.invoke", "SUCCESS", `${command} agent --model ${settings.model}`, "agent returned output", startedAt),
       ...genericAgentToolCallsFromRun("antigravity", stdout, stderr, startedAt),
       toolCall("antigravity", "antigravity.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
@@ -2850,6 +3665,7 @@ async function geminiReply(text, context = {}) {
   const streamProgress = createGenericAgentStreamProgress("gemini_cli", progressReport, startedAt);
   const permission = agentPermissionForContext(context);
   const approvalMode = geminiApprovalMode(permission);
+  const settings = runtimeSettingsForAgent({ id: "gemini_cli" }, context.runtimeSettings || {});
   const prompt = [
     "You are Gemini CLI replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=gemini_cli here and returns one plain chat reply in the encrypted message.accepted envelope.",
@@ -2860,22 +3676,25 @@ async function geminiReply(text, context = {}) {
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
+    ...agentSlashCommandLines(context),
     ...subagentDirectiveLines(),
     ...teamDirectiveLines(),
+    ...fileDirectiveLines(),
     "",
     `User message: ${text || "(empty)"}`,
   ].join("\n");
 
   try {
     progressReport("Starting Gemini CLI...", [
-      toolCall("gemini_cli", "gemini.invoke", "RUNNING", `approval-mode ${approvalMode}`, "launching CLI", startedAt),
+      toolCall("gemini_cli", "gemini.invoke", "RUNNING", `model=${settings.model}`, `approval-mode ${approvalMode}`, startedAt),
     ]);
     const { stdout, stderr } = await spawnFilePromise("/bin/zsh", [
       "-lc",
-      'source "$HOME/.zshrc"; gemini --prompt "$1" --approval-mode "$2" --output-format text',
+      'source "$HOME/.zshrc"; gemini --prompt "$1" --approval-mode "$2" --model "$3" --output-format text',
       "agent-control-gemini",
       prompt,
       approvalMode,
+      settings.model,
     ], {
       timeout: 180000,
       maxBuffer: 1024 * 1024 * 6,
@@ -2895,7 +3714,7 @@ async function geminiReply(text, context = {}) {
     }
     return agentResponse(reply, [
       toolCall("gemini_cli", "gemini.permission", "SUCCESS", permission.label, `approval-mode ${approvalMode}`, startedAt),
-      toolCall("gemini_cli", "gemini.invoke", "SUCCESS", "gemini --prompt", "Gemini CLI returned output", startedAt),
+      toolCall("gemini_cli", "gemini.invoke", "SUCCESS", `gemini --model ${settings.model}`, "Gemini CLI returned output", startedAt),
       ...genericAgentToolCallsFromRun("gemini_cli", stdout, stderr, startedAt),
       toolCall("gemini_cli", "gemini.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
@@ -2912,10 +3731,11 @@ async function opencodeReply(text, context = {}) {
   const progressReport = typeof context.progressReport === "function" ? context.progressReport : () => {};
   const streamProgress = createGenericAgentStreamProgress("opencode", progressReport, startedAt);
   const permission = agentPermissionForContext(context);
+  const settings = runtimeSettingsForAgent({ id: "opencode" }, context.runtimeSettings || {});
   const prompt = [
     "You are OpenCode replying through the Agent Control Android bridge.",
     "API contract: Android sends encrypted POST /v1/messages with payload { text, targetAgentId, attachments }; the bridge routes targetAgentId=opencode here and returns one plain chat reply in the encrypted message.accepted envelope.",
-    "Use the configured OpenCode default provider/model, DeepSeek V4-Pro, unless the bridge command explicitly overrides it.",
+    `Use the selected OpenCode model id: ${settings.model}.`,
     "Reply directly and concisely. Use Chinese unless the user clearly asks otherwise.",
     "Do not edit files or run tools for ordinary chat; if the user explicitly asks for actions, respect the current Agent Control permissions.",
     agentPermissionPromptLine(context),
@@ -2923,21 +3743,27 @@ async function opencodeReply(text, context = {}) {
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
+    ...agentSlashCommandLines(context),
     ...subagentDirectiveLines(),
     ...teamDirectiveLines(),
+    ...fileDirectiveLines(),
     "",
     `User message: ${text || "(empty)"}`,
   ].join("\n");
 
   try {
     progressReport("Starting OpenCode...", [
-      toolCall("opencode", "opencode.run", "RUNNING", `permission=${permission.id}`, "launching CLI", startedAt),
+      toolCall("opencode", "opencode.run", "RUNNING", `model=${settings.model}`, `permission=${permission.id}`, startedAt),
     ]);
+    const variantArgs = settings.reasoningEffort && settings.reasoningEffort !== "default"
+      ? ["--variant", settings.reasoningEffort]
+      : [];
     const { stdout, stderr } = await spawnFilePromise("opencode", [
       "run",
       ...opencodePermissionArgs(permission),
       "--model",
-      "deepseek/deepseek-v4-pro",
+      settings.model,
+      ...variantArgs,
       "--format",
       "default",
       prompt,
@@ -2961,7 +3787,7 @@ async function opencodeReply(text, context = {}) {
     setAgentStatus("opencode", "ONLINE");
     return agentResponse(reply, [
       toolCall("opencode", "opencode.permission", "SUCCESS", permission.label, opencodePermissionSummary(permission), startedAt),
-      toolCall("opencode", "opencode.run", "SUCCESS", "opencode run --model deepseek/deepseek-v4-pro", "OpenCode returned output", startedAt),
+      toolCall("opencode", "opencode.run", "SUCCESS", `opencode run --model ${settings.model}`, "OpenCode returned output", startedAt),
       ...genericAgentToolCallsFromRun("opencode", stdout, stderr, startedAt),
       toolCall("opencode", "opencode.answer", "SUCCESS", "final response", "ready", Date.now()),
     ]);
@@ -2987,8 +3813,10 @@ async function codexReply(text, context = {}) {
     ...conversationMemoryLines(context),
     ...subagentContextLines(context),
     ...teamContextLines(context),
+    ...agentSlashCommandLines(context),
     ...subagentDirectiveLines(),
     ...teamDirectiveLines(),
+    ...fileDirectiveLines(),
     "",
     `User message: ${text || "(empty)"}`,
   ].join("\n");
@@ -3183,7 +4011,7 @@ function handleCodexLegacyProgressLine(marker, progressReport, startedAt, seen) 
       toolCall("codex", "codex.answer", "RUNNING", "final response", "writing", startedAt),
     ]);
   }
-  if (/compact|compressing context|context compaction/i.test(marker) && !seen.has("compact")) {
+  if (/compact|compressing context|context compaction|自动压缩|压缩上下文|上下文压缩/i.test(marker) && !seen.has("compact")) {
     seen.add("compact");
     progressReport("Compressing context...", [
       toolCall("codex", "codex.compact", "RUNNING", "context", marker, startedAt),
@@ -3197,7 +4025,7 @@ function codexToolCallsFromRun(stdout, stderr, settings, permission, startedAt) 
     toolCall("codex", "codex.exec", "SUCCESS", `codex exec -m ${settings.model}`, `${permission.sandbox}, ${settings.reasoningEffort}`, startedAt),
   ];
   calls.push(...parseCodexStdoutActions(stdout, startedAt));
-  if (/compact/i.test(stdout) || /compact/i.test(stderr)) {
+  if (/compact|自动压缩|压缩上下文|上下文压缩/i.test(stdout) || /compact|自动压缩|压缩上下文|上下文压缩/i.test(stderr)) {
     calls.push(toolCall("codex", "codex.compact", "SUCCESS", "context", "auto-compaction noted by Codex CLI", startedAt));
   }
   calls.push(toolCall("codex", "codex.answer", "SUCCESS", "final response", "ready", Date.now()));
@@ -3556,24 +4384,74 @@ async function saveUpload(payload) {
   return transfer;
 }
 
+function guessMimeType(name = "") {
+  const lowered = String(name || "").toLowerCase();
+  if (lowered.endsWith(".png")) return "image/png";
+  if (lowered.endsWith(".jpg") || lowered.endsWith(".jpeg")) return "image/jpeg";
+  if (lowered.endsWith(".gif")) return "image/gif";
+  if (lowered.endsWith(".webp")) return "image/webp";
+  if (lowered.endsWith(".mp4")) return "video/mp4";
+  if (lowered.endsWith(".mov")) return "video/quicktime";
+  if (lowered.endsWith(".webm")) return "video/webm";
+  if (lowered.endsWith(".pdf")) return "application/pdf";
+  if (lowered.endsWith(".json")) return "application/json";
+  if (lowered.endsWith(".md") || lowered.endsWith(".txt") || lowered.endsWith(".log")) return "text/plain";
+  return "application/octet-stream";
+}
+
 async function readDocuments() {
-  const today = new Date().toISOString().slice(0, 10);
-  const docs = [
-    ["memory", "MEMORY.md", join(ROOT, "MEMORY.md")],
-    ["queue", "QUEUE.md", join(ROOT, "QUEUE.md")],
-    ["heartbeat", "heartbeat", join(ROOT, "daily", `${today}.md`)],
-    ["api", "Bridge API", join(PROJECT_ROOT, "README.md")],
-  ];
-  return Promise.all(
-    docs.map(async ([idValue, title, path]) => ({
-      id: idValue,
-      title,
-      path,
-      content: await safeRead(path),
-      editable: idValue !== "api",
-      updatedAt: Date.now(),
-    })),
-  );
+  return allAgents().map(agentWorkReportDocument);
+}
+
+function agentWorkReportDocument(agent) {
+  const messages = state.messages
+    .filter((message) => agentReportBelongsToAgent(message, agent))
+    .slice(-8);
+  const toolCalls = messages.flatMap((message) => Array.isArray(message.toolCalls) ? message.toolCalls : []);
+  const lastTool = toolCalls.at(-1);
+  const failedTool = [...toolCalls].reverse().find((toolCall) => toolCall?.status === "FAILED");
+  const updatedAt = finiteTimestamp(messages.at(-1)?.createdAt, Date.now());
+  const recentLines = messages.length
+    ? messages.map((message) => {
+        const actor = message.authorId === "you" ? "User" : participantName(message.authorId);
+        const summary = reportSafeText(message.text || (message.attachments?.length ? "shared attachment" : ""));
+        return `- ${new Date(finiteTimestamp(message.createdAt, Date.now())).toISOString()} ${actor}: ${summary || "activity recorded"}`;
+      })
+    : ["- No recent work reported yet."];
+  const content = [
+    `${String(agent.status || "UNKNOWN").toLowerCase()} · ${agent.role || "agent"}`,
+    `Tools: ${Array.isArray(agent.tools) && agent.tools.length ? agent.tools.join(", ") : "none reported"}`,
+    `Last action: ${reportToolLabel(lastTool)}`,
+    `Recent error: ${failedTool ? reportSafeText(failedTool.output || failedTool.input || "failed") : "none"}`,
+    "Recent work:",
+    ...recentLines,
+  ].join("\n");
+  return {
+    id: `agent-report-${agent.id}`,
+    title: agent.name,
+    path: `agent-report://${agent.id}`,
+    content,
+    editable: false,
+    updatedAt,
+  };
+}
+
+function agentReportBelongsToAgent(message, agent) {
+  if (!message || !agent?.id) return false;
+  return message.authorId === agent.id || message.targetAgentId === agent.id;
+}
+
+function reportToolLabel(toolCall) {
+  if (!toolCall?.toolName) return "none";
+  const status = String(toolCall.status || "").toLowerCase();
+  return `${toolCall.toolName}${status ? ` (${status})` : ""}`;
+}
+
+function reportSafeText(value = "") {
+  return boundedText(String(value || "")
+    .replace(/\b\d{4}\s?\d{4}\b/g, "**** ****")
+    .replace(/\b(bearer|token|secret|key|password)=([^,\s]+)/gi, "$1=<redacted>")
+    .replace(/\s+/g, " "), 220);
 }
 
 async function writeProjectDocument(documentId, content) {
