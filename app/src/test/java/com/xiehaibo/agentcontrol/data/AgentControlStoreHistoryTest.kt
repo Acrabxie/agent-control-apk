@@ -10,6 +10,7 @@ import com.xiehaibo.agentcontrol.model.AgentCapabilityOption
 import com.xiehaibo.agentcontrol.model.AgentKind
 import com.xiehaibo.agentcontrol.model.AgentNode
 import com.xiehaibo.agentcontrol.model.AgentStatus
+import com.xiehaibo.agentcontrol.model.AgentTeam
 import com.xiehaibo.agentcontrol.model.ChatMessage
 import com.xiehaibo.agentcontrol.model.MessageKind
 import com.xiehaibo.agentcontrol.model.SlashCommand
@@ -18,6 +19,14 @@ import com.xiehaibo.agentcontrol.model.ToolStatus
 import org.junit.Test
 
 class AgentControlStoreHistoryTest {
+    @Test
+    fun freshStoreStartsWithoutDemoAgents() {
+        val store = AgentControlStore()
+
+        assertThat(store.agents).isEmpty()
+        assertThat(store.teams).isEmpty()
+    }
+
     @Test
     fun restoresLocalConversationHistoryAndSendsItAsContext() {
         val persistence = FakeConversationPersistence()
@@ -141,6 +150,7 @@ class AgentControlStoreHistoryTest {
     @Test
     fun agentDetailRuntimeUpdatesUseTargetSpecificStorePaths() {
         val store = AgentControlStore()
+        store.applyRosterForTest(listOf(codexAgent(), claudeAgent()))
 
         store.updateModelForTarget("claude", "opus")
         store.updateReasoningForTarget("claude", "max")
@@ -191,6 +201,7 @@ class AgentControlStoreHistoryTest {
     @Test
     fun localDismissCommandRemovesSelectedSubagentFromRosterAndTeams() {
         val store = AgentControlStore()
+        store.applyRosterForTest(listOf(codexAgent()))
 
         store.selectedTargetId = "codex"
         store.runCommand(SlashCommand("/spawn", "Spawn", "selected"))
@@ -256,6 +267,7 @@ class AgentControlStoreHistoryTest {
     @Test
     fun teamMessagesDoNotLeakIntoSingleAgentConversation() {
         val store = AgentControlStore()
+        store.applyRosterForTest(listOf(codexAgent()))
         val teamConversationId = store.conversationIdFor("core")
         val directConversationId = store.conversationIdFor("codex")
 
@@ -290,13 +302,14 @@ class AgentControlStoreHistoryTest {
     @Test
     fun slashCommandsAcceptBotSuffixAndTrailingPunctuation() {
         val store = AgentControlStore()
+        store.applyRosterForTest(listOf(codexAgent()))
         store.selectedTargetId = "codex"
         store.draftText = "/status@AgentControl。"
 
         val message = store.consumeDraft()!!
         store.respondLocallyTo(message)
 
-        assertThat(store.messages.map { it.text }).contains("Team online: 4 online, 2 subagents visible.")
+        assertThat(store.messages.map { it.text }).contains("Team online: 1 online, 0 subagents visible.")
 
         store.draftText = "／perms@AgentControl,"
         val permissions = store.consumeDraft()!!
@@ -341,4 +354,65 @@ class AgentControlStoreHistoryTest {
             state = null
         }
     }
+
+    private fun AgentControlStore.applyRosterForTest(agents: List<AgentNode>) {
+        applySnapshot(
+            BridgeSnapshot(
+                agents = agents,
+                teams = listOf(
+                    AgentTeam(
+                        id = "core",
+                        name = "Local Agent Team",
+                        adminAgentId = agents.firstOrNull()?.id ?: "codex",
+                        memberIds = agents.map { it.id },
+                        sharedProfile = "test roster",
+                    )
+                ),
+                commands = emptyList(),
+                messages = emptyList(),
+                transfers = emptyList(),
+                documents = emptyList(),
+                heartbeats = emptyList(),
+            )
+        )
+    }
+
+    private fun codexAgent(): AgentNode =
+        AgentNode(
+            id = "codex",
+            name = "Codex",
+            kind = AgentKind.CODEX,
+            role = "controller",
+            status = AgentStatus.ONLINE,
+            modelOptions = listOf(AgentCapabilityOption("gpt-5.5", "gpt-5.5")),
+            reasoningOptions = listOf(AgentCapabilityOption("low", "Low")),
+            permissionOptions = listOf(
+                AgentCapabilityOption("read-only", "Read Only"),
+                AgentCapabilityOption("workspace-write", "Workspace Write"),
+            ),
+            slashCommands = listOf(SlashCommand("/plan", "Plan", "selected")),
+            canSpawnChildren = true,
+        )
+
+    private fun claudeAgent(): AgentNode =
+        AgentNode(
+            id = "claude",
+            name = "Claude Code",
+            kind = AgentKind.CLAUDE_CODE,
+            role = "implementation",
+            status = AgentStatus.ONLINE,
+            modelOptions = listOf(
+                AgentCapabilityOption("sonnet", "sonnet"),
+                AgentCapabilityOption("opus", "opus"),
+            ),
+            reasoningOptions = listOf(
+                AgentCapabilityOption("medium", "Medium"),
+                AgentCapabilityOption("max", "Max"),
+            ),
+            permissionOptions = listOf(
+                AgentCapabilityOption("read-only", "Read Only"),
+                AgentCapabilityOption("workspace-write", "Workspace Write"),
+            ),
+            canSpawnChildren = true,
+        )
 }

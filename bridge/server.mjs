@@ -40,10 +40,10 @@ const MAX_SHARED_FILE_PROMPT_CHARS = 3200;
 const BRIDGE_ONLINE_MESSAGE = "Desktop bridge online. Pair the phone, then stream encrypted agent events.";
 const CODEX_DEFAULT_MODEL = "gpt-5.5";
 const CODEX_MODEL_OPTIONS = [
-  { id: "gpt-5.5", label: "5.5", contextLimitTokens: 400000 },
-  { id: "gpt-5.4", label: "5.4", contextLimitTokens: 400000 },
-  { id: "gpt-5.3-codex", label: "5.3 Codex", contextLimitTokens: 200000 },
-  { id: "gpt-5.2", label: "5.2", contextLimitTokens: 200000 },
+  { id: "gpt-5.5", label: "gpt-5.5", contextLimitTokens: 400000 },
+  { id: "gpt-5.4", label: "gpt-5.4", contextLimitTokens: 400000 },
+  { id: "gpt-5.3-codex", label: "gpt-5.3-codex", contextLimitTokens: 200000 },
+  { id: "gpt-5.2", label: "gpt-5.2", contextLimitTokens: 200000 },
 ];
 const CODEX_REASONING_OPTIONS = [
   { id: "low", label: "Low" },
@@ -193,6 +193,9 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["shell", "patch", "browser", "notion", "android-build", "bridge"],
+    modelOptions: CODEX_MODEL_OPTIONS,
+    reasoningOptions: CODEX_REASONING_OPTIONS,
+    permissionOptions: CODEX_PERMISSION_OPTIONS,
     slashCommands: [
       { trigger: "/plan", label: "Plan", target: "selected" },
       { trigger: "/diff", label: "Diff", target: "selected" },
@@ -211,6 +214,9 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["repo-read", "edit", "test", "review"],
+    modelOptions: CLAUDE_MODEL_OPTIONS,
+    reasoningOptions: CLAUDE_REASONING_OPTIONS,
+    permissionOptions: CODEX_PERMISSION_OPTIONS,
     slashCommands: [
       { trigger: "/plan", label: "Plan", target: "selected" },
       { trigger: "/edit", label: "Edit", target: "selected" },
@@ -229,6 +235,9 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["browser", "manual-check", "visual-review"],
+    modelOptions: ANTIGRAVITY_MODEL_OPTIONS,
+    reasoningOptions: ANTIGRAVITY_REASONING_OPTIONS,
+    permissionOptions: CODEX_PERMISSION_OPTIONS,
     slashCommands: [
       { trigger: "/review", label: "Review", target: "selected" },
       { trigger: "/screenshot", label: "Screenshot", target: "selected" },
@@ -245,6 +254,9 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["gemini", "planning", "analysis", "review"],
+    modelOptions: GEMINI_MODEL_OPTIONS,
+    reasoningOptions: GEMINI_REASONING_OPTIONS,
+    permissionOptions: CODEX_PERMISSION_OPTIONS,
     slashCommands: [
       { trigger: "/ask", label: "Ask", target: "selected" },
       { trigger: "/plan", label: "Plan", target: "selected" },
@@ -262,6 +274,9 @@ const agentDefinitions = [
     parentId: null,
     teamId: "core",
     tools: ["opencode", "deepseek-v4-pro", "coding", "review"],
+    modelOptions: OPENCODE_MODEL_OPTIONS,
+    reasoningOptions: OPENCODE_REASONING_OPTIONS,
+    permissionOptions: CODEX_PERMISSION_OPTIONS,
     slashCommands: [
       { trigger: "/run", label: "Run", target: "selected" },
       { trigger: "/edit", label: "Edit", target: "selected" },
@@ -2497,7 +2512,14 @@ function optionSummary(options = []) {
 }
 
 function allAgents() {
-  return [...agentDefinitions, ...state.dynamicAgents];
+  return [...registeredAgentDefinitions(), ...state.dynamicAgents];
+}
+
+function registeredAgentDefinitions() {
+  return agentDefinitions.filter((agent) => {
+    if (agent.id === "codex") return true;
+    return agent.status === "ONLINE";
+  });
 }
 
 function allSlashCommands() {

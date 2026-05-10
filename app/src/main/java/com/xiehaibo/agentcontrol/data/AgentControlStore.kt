@@ -60,7 +60,13 @@ class AgentControlStore(
     var pairingKeyDraft by mutableStateOf("")
     var deviceId by mutableStateOf("")
     var sessionKey by mutableStateOf<SecretKey?>(null)
-    var codexRuntimeSettings by mutableStateOf(CodexRuntimeSettings())
+    var codexRuntimeSettings by mutableStateOf(
+        CodexRuntimeSettings(
+            model = "",
+            reasoningEffort = "",
+            contextLimitTokens = 0,
+        )
+    )
     var latestBridgeHealth by mutableStateOf<BridgeHealth?>(null)
     var latestBridgeDiagnostics by mutableStateOf<BridgeDiagnostics?>(null)
     var diagnosticsRunning by mutableStateOf(false)
@@ -80,121 +86,18 @@ class AgentControlStore(
 
     val pendingAttachments = mutableStateListOf<FileTransfer>()
     val transfers = mutableStateListOf<FileTransfer>()
-    val agents = mutableStateListOf(
-        AgentNode(
-            id = "codex",
-            name = "Codex",
-            kind = AgentKind.CODEX,
-            role = "controller, planner, integrator",
-            status = AgentStatus.ONLINE,
-            tools = listOf("shell", "patch", "browser", "notion", "android-build"),
-            slashCommands = listOf(
-                SlashCommand("/plan", "Plan", "selected"),
-                SlashCommand("/diff", "Diff", "selected"),
-                SlashCommand("/review", "Review", "selected"),
-                SlashCommand("/test", "Test", "selected"),
-                SlashCommand("/commit", "Commit", "selected"),
-            ),
-            canSpawnChildren = true,
-        ),
-        AgentNode(
-            id = "claude",
-            name = "Claude Code",
-            kind = AgentKind.CLAUDE_CODE,
-            role = "deep implementation and repo surgery",
-            status = AgentStatus.IDLE,
-            tools = listOf("repo-read", "edit", "test", "review"),
-            slashCommands = listOf(
-                SlashCommand("/plan", "Plan", "selected"),
-                SlashCommand("/edit", "Edit", "selected"),
-                SlashCommand("/diff", "Diff", "selected"),
-                SlashCommand("/review", "Review", "selected"),
-                SlashCommand("/login", "Login status", "selected"),
-            ),
-            canSpawnChildren = true,
-        ),
-        AgentNode(
-            id = "antigravity",
-            name = "Antigravity",
-            kind = AgentKind.ANTIGRAVITY,
-            role = "independent UI/product review",
-            status = AgentStatus.IDLE,
-            tools = listOf("browser", "manual-check", "visual-review"),
-            slashCommands = listOf(
-                SlashCommand("/review", "Review", "selected"),
-                SlashCommand("/screenshot", "Screenshot", "selected"),
-                SlashCommand("/issues", "Issues", "selected"),
-            ),
-            canSpawnChildren = true,
-        ),
-        AgentNode(
-            id = "gemini_cli",
-            name = "Gemini CLI",
-            kind = AgentKind.GEMINI_CLI,
-            role = "official Gemini API-key agent lane",
-            status = AgentStatus.ONLINE,
-            tools = listOf("gemini", "planning", "analysis", "review"),
-            slashCommands = listOf(
-                SlashCommand("/ask", "Ask", "selected"),
-                SlashCommand("/plan", "Plan", "selected"),
-                SlashCommand("/research", "Research", "selected"),
-                SlashCommand("/review", "Review", "selected"),
-            ),
-            canSpawnChildren = false,
-        ),
-        AgentNode(
-            id = "opencode",
-            name = "OpenCode",
-            kind = AgentKind.OPENCODE,
-            role = "OpenCode CLI using DeepSeek V4-Pro",
-            status = AgentStatus.ONLINE,
-            tools = listOf("opencode", "deepseek-v4-pro", "coding", "review"),
-            slashCommands = listOf(
-                SlashCommand("/run", "Run", "selected"),
-                SlashCommand("/edit", "Edit", "selected"),
-                SlashCommand("/test", "Test", "selected"),
-                SlashCommand("/review", "Review", "selected"),
-            ),
-            canSpawnChildren = true,
-        ),
-        AgentNode(
-            id = "sub-security",
-            name = "Security Subagent",
-            kind = AgentKind.SUBAGENT,
-            role = "pairing, envelope crypto, threat review",
-            status = AgentStatus.ONLINE,
-            parentId = "codex",
-            tools = listOf("crypto-check", "api-review"),
-            slashCommands = listOf(
-                SlashCommand("/audit", "Audit", "selected"),
-                SlashCommand("/threat-model", "Threat model", "selected"),
-            ),
-        ),
-        AgentNode(
-            id = "sub-files",
-            name = "Transfer Subagent",
-            kind = AgentKind.SUBAGENT,
-            role = "photo and file shuttle",
-            status = AgentStatus.BUSY,
-            parentId = "claude",
-            tools = listOf("upload", "download", "checksum"),
-            slashCommands = listOf(
-                SlashCommand("/files", "Files", "transfer"),
-                SlashCommand("/checksum", "Checksum", "selected"),
-            ),
-        ),
-    )
+    val agents = mutableStateListOf<AgentNode>()
 
     val team = mutableStateOf(
         AgentTeam(
             id = "core",
             name = "Local Agent Team",
             adminAgentId = "codex",
-            memberIds = agents.map { it.id },
-            sharedProfile = "One shared roster, one admin, visible subagent tree.",
+            memberIds = emptyList(),
+            sharedProfile = "Agents appear here after they connect through the paired desktop bridge.",
         )
     )
-    val teams = mutableStateListOf(team.value)
+    val teams = mutableStateListOf<AgentTeam>()
 
     val commands = mutableStateListOf(
         SlashCommand("/status", "Status", "team"),
@@ -226,34 +129,7 @@ class AgentControlStore(
         SlashCommand("/help", "Help", "chat"),
     )
 
-    val messages = mutableStateListOf(
-        ChatMessage(
-            id = nextId(),
-            authorId = "system",
-            kind = MessageKind.SYSTEM,
-            text = "Secure pairing is ready. Select an agent, use a slash command, or attach a file.",
-            createdAt = now(),
-        ),
-        ChatMessage(
-            id = nextId(),
-            authorId = "codex",
-            targetAgentId = "team",
-            kind = MessageKind.AGENT,
-            text = "MVP channel online. Tool calls, subagents, files, team hierarchy, memory, and heartbeat are visible from the phone.",
-            createdAt = now(),
-            toolCalls = listOf(
-                ToolCall(
-                    id = nextId(),
-                    agentId = "codex",
-                    toolName = "shared-agent-loop",
-                    status = ToolStatus.SUCCESS,
-                    input = "read roles, queue, memory, daily log",
-                    output = "shared state mounted",
-                    startedAt = now(),
-                )
-            ),
-        ),
-    )
+    val messages = mutableStateListOf<ChatMessage>()
     val activeConversationIds = mutableStateMapOf<String, String>()
     val seenConversationTimestamps = mutableStateMapOf<String, Long>()
     val agentPermissionModes = mutableStateMapOf<String, String>()
@@ -316,24 +192,26 @@ class AgentControlStore(
         ),
     )
 
-    val heartbeats = mutableStateListOf(
-        HeartbeatEntry(nextId(), "codex", "Controller lease active; Android shell visible.", now()),
-        HeartbeatEntry(nextId(), "sub-security", "Pairing fingerprint generated.", now()),
-        HeartbeatEntry(nextId(), "sub-files", "Bidirectional transfer queue empty.", now()),
-    )
+    val heartbeats = mutableStateListOf<HeartbeatEntry>()
 
     init {
-        restorePersistedConversation()
-        editorText = selectedDocument().content
         restorePersistedPairing()
+        restorePersistedConversation()
+        if (!pairingInfo.paired && latestSnapshotVerifiedAt == null) {
+            clearVisibleRoster()
+        }
+        editorText = selectedDocument().content
     }
 
-    fun selectedAgent(): AgentNode = agents.first { it.id == selectedAgentId }
+    fun selectedAgent(): AgentNode =
+        agents.firstOrNull { it.id == selectedAgentId }
+            ?: agents.firstOrNull()
+            ?: localFallbackAgent(selectedAgentId.ifBlank { "codex" })
 
     fun selectedTargetName(): String =
         teams.firstOrNull { it.id == selectedTargetId }?.name
             ?: agents.firstOrNull { it.id == selectedTargetId }?.name
-            ?: selectedTargetId
+            ?: selectedTargetId.ifBlank { "desktop bridge" }
 
     fun selectedDocument(): ProjectDocument = documents.first { it.id == selectedDocumentId }
 
@@ -470,11 +348,7 @@ class AgentControlStore(
         agents.clear()
         agents.addAll(snapshot.agents)
         teams.clear()
-        teams.addAll(
-            snapshot.teams.ifEmpty {
-                listOf(team.value.copy(memberIds = snapshot.agents.map { it.id }))
-            }
-        )
+        teams.addAll(if (snapshot.teams.isNotEmpty()) snapshot.teams else inferredTeamsForSnapshot(snapshot.agents))
         commands.clear()
         commands.addAll(snapshot.commands)
         mergeMessages(snapshot.messages)
@@ -486,18 +360,36 @@ class AgentControlStore(
         heartbeats.addAll(snapshot.heartbeats)
         codexRuntimeSettings = mergeCodexRuntimeSettings(snapshot.runtimeSettings.codex)
         mergeAgentRuntimeSettings(snapshot.runtimeSettings.agents)
-        team.value = teams.firstOrNull { it.id == "core" } ?: team.value.copy(memberIds = agents.map { it.id })
-        if (agents.none { it.id == selectedAgentId }) {
-            selectedAgentId = agents.firstOrNull()?.id ?: "codex"
-        }
-        if (agents.none { it.id == selectedTargetId } && teams.none { it.id == selectedTargetId }) {
-            selectedTargetId = selectedAgentId
-        }
+        team.value = teams.firstOrNull { it.id == "core" } ?: emptyCoreTeam(agents.map { it.id })
+        normalizeSelections()
         if (documents.none { it.id == selectedDocumentId }) {
             selectedDocumentId = documents.firstOrNull()?.id ?: "memory"
         }
         editorText = documents.firstOrNull { it.id == selectedDocumentId }?.content.orEmpty()
         persistConversation()
+    }
+
+    private fun inferredTeamsForSnapshot(snapshotAgents: List<AgentNode>): List<AgentTeam> =
+        if (snapshotAgents.isEmpty()) emptyList() else listOf(emptyCoreTeam(snapshotAgents.map { it.id }))
+
+    private fun emptyCoreTeam(memberIds: List<String> = emptyList()): AgentTeam =
+        AgentTeam(
+            id = "core",
+            name = "Local Agent Team",
+            adminAgentId = memberIds.firstOrNull() ?: "codex",
+            memberIds = memberIds,
+            sharedProfile = "Agents appear here after they connect through the paired desktop bridge.",
+        )
+
+    private fun clearVisibleRoster() {
+        agents.clear()
+        teams.clear()
+        team.value = emptyCoreTeam()
+        selectedAgentId = ""
+        selectedTargetId = ""
+        activeConversationIds.clear()
+        agentRuntimeSettings.clear()
+        codexRuntimeSettings = CodexRuntimeSettings(model = "", reasoningEffort = "", contextLimitTokens = 0)
     }
 
     fun queueAttachment(uri: String, name: String, mimeType: String) {
@@ -649,7 +541,9 @@ class AgentControlStore(
         agentRuntimeSettings[targetId]?.let { return it }
         val runtimeKey = runtimeKeyForTarget(targetId)
         return if (runtimeKey == "codex") {
-            codexRuntimeSettings
+            codexRuntimeSettings.takeIf { it.model.isNotBlank() && it.modelOptions.isNotEmpty() }
+                ?: declaredRuntimeSettings(agentForTarget(targetId) ?: rootAgentForTarget(targetId))
+                ?: codexRuntimeSettings
         } else {
             agentRuntimeSettings[runtimeKey]
                 ?: defaultRuntimeSettingsForAgent(agentForTarget(targetId) ?: rootAgentForTarget(targetId))
@@ -718,98 +612,14 @@ class AgentControlStore(
 
     private fun defaultRuntimeSettingsForAgent(agent: AgentNode?): CodexRuntimeSettings {
         declaredRuntimeSettings(agent)?.let { return it }
-        return when (agent?.kind) {
-        AgentKind.CLAUDE_CODE -> CodexRuntimeSettings(
-            model = "claude-sonnet-4-6",
-            reasoningEffort = "medium",
-            contextLimitTokens = 200_000,
-            modelOptions = listOf(
-                RuntimeOption("claude-sonnet-4-6", "Claude Sonnet 4.6"),
-                RuntimeOption("claude-opus-4-6", "Claude Opus 4.6"),
-                RuntimeOption("sonnet", "sonnet"),
-                RuntimeOption("opus", "opus"),
-            ),
-            reasoningOptions = listOf(
-                RuntimeOption("low", "Low"),
-                RuntimeOption("medium", "Medium"),
-                RuntimeOption("high", "High"),
-                RuntimeOption("xhigh", "Extra High"),
-                RuntimeOption("max", "Max"),
-            ),
+        return CodexRuntimeSettings(
+            model = agent?.id.orEmpty(),
+            reasoningEffort = "",
+            contextLimitTokens = 0,
+            modelOptions = emptyList(),
+            reasoningOptions = emptyList(),
             permissionOptions = defaultPermissionOptions(),
         )
-        AgentKind.GEMINI_CLI -> CodexRuntimeSettings(
-            model = "gemini-2.5-flash",
-            reasoningEffort = "default",
-            contextLimitTokens = 1_048_576,
-            modelOptions = listOf(
-                RuntimeOption("gemini-2.5-flash", "Gemini 2.5 Flash"),
-                RuntimeOption("gemini-2.5-pro", "Gemini 2.5 Pro"),
-                RuntimeOption("gemini-3-flash-preview", "Gemini 3 Flash"),
-                RuntimeOption("gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
-            ),
-            reasoningOptions = listOf(RuntimeOption("default", "Default")),
-            permissionOptions = defaultPermissionOptions(),
-        )
-        AgentKind.ANTIGRAVITY -> CodexRuntimeSettings(
-            model = "openrouter/deepseek/deepseek-v3.2",
-            reasoningEffort = "off",
-            contextLimitTokens = 160_000,
-            modelOptions = listOf(
-                RuntimeOption("openrouter/deepseek/deepseek-v3.2", "DeepSeek V3.2"),
-                RuntimeOption("openrouter/google/gemini-3-flash-preview", "Gemini 3 Flash"),
-                RuntimeOption("openrouter/anthropic/claude-opus-4.6", "Claude Opus 4.6"),
-                RuntimeOption("openrouter/google/gemini-3.1-pro-preview", "Gemini 3.1 Pro"),
-                RuntimeOption("openai/gpt-5.4", "GPT 5.4"),
-                RuntimeOption("openai-codex/gpt-5.4", "Codex GPT 5.4"),
-            ),
-            reasoningOptions = listOf(
-                RuntimeOption("off", "Off"),
-                RuntimeOption("minimal", "Minimal"),
-                RuntimeOption("low", "Low"),
-                RuntimeOption("medium", "Medium"),
-                RuntimeOption("high", "High"),
-                RuntimeOption("xhigh", "Extra High"),
-            ),
-            permissionOptions = defaultPermissionOptions(),
-        )
-        AgentKind.OPENCODE -> CodexRuntimeSettings(
-            model = "deepseek/deepseek-v4-pro",
-            reasoningEffort = "default",
-            contextLimitTokens = 128_000,
-            modelOptions = listOf(
-                RuntimeOption("deepseek/deepseek-v4-pro", "DeepSeek V4-Pro"),
-                RuntimeOption("openrouter/deepseek/deepseek-v3.2", "DeepSeek V3.2"),
-                RuntimeOption("openrouter/google/gemini-3-flash-preview", "Gemini 3 Flash"),
-                RuntimeOption("openrouter/anthropic/claude-opus-4.6", "Claude Opus 4.6"),
-            ),
-            reasoningOptions = listOf(
-                RuntimeOption("default", "Default"),
-                RuntimeOption("minimal", "Minimal"),
-                RuntimeOption("low", "Low"),
-                RuntimeOption("medium", "Medium"),
-                RuntimeOption("high", "High"),
-                RuntimeOption("max", "Max"),
-            ),
-            permissionOptions = defaultPermissionOptions(),
-        )
-        else -> CodexRuntimeSettings(
-            model = "gpt-5.5",
-            modelOptions = listOf(
-                RuntimeOption("gpt-5.5", "5.5"),
-                RuntimeOption("gpt-5.4", "5.4"),
-                RuntimeOption("gpt-5.3-codex", "5.3 Codex"),
-                RuntimeOption("gpt-5.2", "5.2"),
-            ),
-            reasoningOptions = listOf(
-                RuntimeOption("low", "Low"),
-                RuntimeOption("medium", "Medium"),
-                RuntimeOption("high", "High"),
-                RuntimeOption("xhigh", "Extra High"),
-            ),
-            permissionOptions = defaultPermissionOptions(),
-        )
-        }
     }
 
     private fun declaredRuntimeSettings(agent: AgentNode?): CodexRuntimeSettings? {
@@ -871,7 +681,6 @@ class AgentControlStore(
         }
         agentRuntimeSettings.clear()
         agentRuntimeSettings.putAll(merged)
-        agentRuntimeSettings["codex"] = codexRuntimeSettings
     }
 
     private fun optionExists(options: List<RuntimeOption>, id: String): Boolean =
@@ -1506,7 +1315,13 @@ class AgentControlStore(
         codexRuntimeSettings = restored.codexRuntimeSettings
         agentRuntimeSettings.clear()
         agentRuntimeSettings.putAll(restored.agentRuntimeSettings)
-        agentRuntimeSettings["codex"] = codexRuntimeSettings
+        if (!pairingInfo.paired) {
+            agents.clear()
+            teams.clear()
+            team.value = emptyCoreTeam()
+            agentRuntimeSettings.clear()
+            codexRuntimeSettings = CodexRuntimeSettings(model = "", reasoningEffort = "", contextLimitTokens = 0)
+        }
         normalizeSelections()
     }
 
@@ -1597,7 +1412,7 @@ class AgentControlStore(
 
     private fun normalizeSelections() {
         if (agents.none { it.id == selectedAgentId }) {
-            selectedAgentId = agents.firstOrNull()?.id ?: "codex"
+            selectedAgentId = agents.firstOrNull()?.id.orEmpty()
         }
         if (agents.none { it.id == selectedTargetId } && teams.none { it.id == selectedTargetId }) {
             selectedTargetId = selectedAgentId
@@ -1617,6 +1432,15 @@ class AgentControlStore(
     }
 
     private fun agentName(id: String): String = agents.firstOrNull { it.id == id }?.name ?: id
+
+    private fun localFallbackAgent(id: String = "codex"): AgentNode =
+        AgentNode(
+            id = id.ifBlank { "codex" },
+            name = id.ifBlank { "Desktop bridge" }.replaceFirstChar { it.uppercase() },
+            kind = AgentKind.CODEX,
+            role = "Pair a desktop bridge to load real agents.",
+            status = AgentStatus.IDLE,
+        )
 
     private fun nextId(): String = UUID.randomUUID().toString()
 

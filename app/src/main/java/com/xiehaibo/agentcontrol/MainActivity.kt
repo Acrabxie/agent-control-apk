@@ -187,7 +187,6 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppPanel {
     CHAT,
-    SETUP,
     PROJECT,
 }
 
@@ -364,11 +363,10 @@ private fun AgentControlApp(
         val desktopUrl = currentBridgeUrl()
         if (desktopUrl.isBlank()) {
             store.recordDiagnosticsFailure("Enter a desktop or relay address before running diagnostics.")
-            panel = AppPanel.SETUP
+            store.addSystemMessage("Enter a desktop or relay address before running diagnostics.")
             return
         }
         store.beginDiagnostics()
-        panel = AppPanel.SETUP
         scope.launch {
             var health = store.latestBridgeHealth
             try {
@@ -487,6 +485,26 @@ private fun AgentControlApp(
         onPairingLinkConsumed()
     }
 
+    LaunchedEffect(store.pairingInfo.paired, store.deviceId, store.sessionKey) {
+        val key = store.sessionKey ?: return@LaunchedEffect
+        if (!store.pairingInfo.paired || store.deviceId.isBlank()) return@LaunchedEffect
+        runCatching {
+            withTimeout(30_000) {
+                withContext(Dispatchers.IO) {
+                    NetworkBridgeClient.fetchSnapshot(
+                        desktopUrl = currentBridgeUrl(),
+                        deviceId = store.deviceId,
+                        sessionKey = key,
+                    )
+                }
+            }
+        }.onSuccess { snapshot ->
+            store.applySnapshot(snapshot)
+        }.onFailure { error ->
+            store.rememberSendFailure(error.message ?: "Snapshot refresh failed")
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -535,13 +553,6 @@ private fun AgentControlApp(
                     colors = warmNavigationItemColors(),
                 )
                 NavigationBarItem(
-                    selected = panel == AppPanel.SETUP,
-                    onClick = { panel = AppPanel.SETUP },
-                    icon = { Icon(Icons.Default.Build, contentDescription = null) },
-                    label = { Text("Setup") },
-                    colors = warmNavigationItemColors(),
-                )
-                NavigationBarItem(
                     selected = panel == AppPanel.PROJECT,
                     onClick = { panel = AppPanel.PROJECT },
                     icon = { Icon(Icons.Default.Folder, contentDescription = null) },
@@ -560,13 +571,7 @@ private fun AgentControlApp(
             when (panel) {
                 AppPanel.CHAT -> ChatPanel(
                     store = store,
-                )
-                AppPanel.SETUP -> SetupPanel(
-                    store = store,
                     onStartPairing = { showPairDialog = true },
-                    onRunDiagnostics = { runDiagnostics() },
-                    onSendStatus = { sendStatusCommand() },
-                    onCopyTesterReport = { copyTesterReport() },
                 )
                 AppPanel.PROJECT -> ProjectPanel(
                     store = store,
@@ -1117,6 +1122,7 @@ private fun OnboardingInfoBlock(
 @Composable
 private fun ChatPanel(
     store: AgentControlStore,
+    onStartPairing: () -> Unit,
 ) {
     val context = LocalContext.current
     val focusManager = LocalFocusManager.current
@@ -1202,6 +1208,7 @@ private fun ChatPanel(
     if (activeAgent == null && activeTeam == null) {
         ConversationList(
             store = store,
+            onStartPairing = onStartPairing,
             onOpenAgent = { agent ->
                 store.selectedAgentId = agent.id
                 store.selectedTargetId = agent.id
@@ -1470,6 +1477,7 @@ private fun ChatPanel(
 @Composable
 private fun ConversationList(
     store: AgentControlStore,
+    onStartPairing: () -> Unit,
     onOpenAgent: (AgentNode) -> Unit,
     onOpenTeam: (AgentTeam) -> Unit,
 ) {
@@ -1479,6 +1487,14 @@ private fun ConversationList(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        if (store.agents.isEmpty() && store.teams.isEmpty()) {
+            item {
+                EmptyAgentRosterCard(
+                    paired = store.pairingInfo.paired,
+                    onStartPairing = onStartPairing,
+                )
+            }
+        }
         items(store.teams, key = { "team-${it.id}" }) { team ->
             TeamConversationRow(
                 team = team,
@@ -1498,6 +1514,48 @@ private fun ConversationList(
                 unreadCount = store.unreadCompletedCount(agent.id),
                 onClick = { onOpenAgent(agent) },
             )
+        }
+    }
+}
+
+@Composable
+private fun EmptyAgentRosterCard(
+    paired: Boolean,
+    onStartPairing: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.48f)),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(Icons.Default.Terminal, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Text(
+                "No agents connected",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                if (paired) {
+                    "The phone is paired. Agents will appear here after the desktop bridge reports its registered adapters."
+                } else {
+                    "Pair a desktop bridge first. The phone does not preload demo agents; each agent appears after it connects through the bridge."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onStartPairing,
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(if (paired) "Pair again" else "Start pairing")
+            }
         }
     }
 }
@@ -3122,10 +3180,10 @@ private fun runtimeLabel(options: List<RuntimeOption>, id: String, fallback: Str
     options.firstOrNull { it.id == id }?.label ?: fallback
 
 private fun fallbackModelLabel(id: String): String = when (id) {
-    "gpt-5.5" -> "5.5"
-    "gpt-5.4" -> "5.4"
-    "gpt-5.3-codex" -> "5.3 Codex"
-    "gpt-5.2" -> "5.2"
+    "gpt-5.5" -> "gpt-5.5"
+    "gpt-5.4" -> "gpt-5.4"
+    "gpt-5.3-codex" -> "gpt-5.3-codex"
+    "gpt-5.2" -> "gpt-5.2"
     "claude-sonnet-4-6" -> "Claude Sonnet 4.6"
     "claude-opus-4-6" -> "Claude Opus 4.6"
     "gemini-2.5-flash" -> "Gemini 2.5 Flash"
